@@ -1,0 +1,245 @@
+2025-10-17 20:55:02,790 - INFO - Scraping detail page 1/1155: https://www.local.ch/fr/d/horgen/8810/veterinaire/katzen-praxis-ch-ZK3bBGLNvPg9sRdtdRPIPQ
+2025-10-17 20:55:13,656 - WARNING - Attempt 1 failed. Retrying in 5 seconds...
+2025-10-17 20:55:28,858 - WARNING - Attempt 2 failed. Retrying in 10 seconds...
+2025-10-17 20:55:49,336 - ERROR - Error processing link https://www.local.ch/fr/d/horgen/8810/veterinaire/katzen-praxis-ch-ZK3bBGLNvPg9sRdtdRPIPQ: Message: 
+Stacktrace:
+	GetHandleVerifier [0x0x7ff699ede9e5+80021]
+	GetHandleVerifier [0x0x7ff699edea40+80112]
+	(No symbol) [0x0x7ff699c6060f]
+	(No symbol) [0x0x7ff699cb8854]
+	(No symbol) [0x0x7ff699cb8b1c]
+	(No symbol) [0x0x7ff699d0c927]
+	(No symbol) [0x0x7ff699ce126f]
+	(No symbol) [0x0x7ff699d0968a]
+	(No symbol) [0x0x7ff699ce1003]
+	(No symbol) [0x0x7ff699ca95d1]
+	(No symbol) [0x0x7ff699caa3f3]
+	GetHandleVerifier [0x0x7ff69a19dd8d+2960445]
+	GetHandleVerifier [0x0x7ff69a19804a+2936570]
+	GetHandleVerifier [0x0x7ff69a1b8a87+3070263]
+	GetHandleVerifier [0x0x7ff699ef84ce+185214]
+	GetHandleVerifier [0x0x7ff699efff1f+216527]
+	GetHandleVerifier [0x0x7ff699ee7c24+117460]
+	GetHandleVerifier [0x0x7ff699ee7ddf+117903]
+	GetHandleVerifier [0x0x7ff699ecdcb8+11112]
+	BaseThreadInitThunk [0x0x7ffe40897374+20]
+	RtlUserThreadStart [0x0x7ffe4191cc91+33]
+
+2025-10-17 20:55:51,338 - INFO - Scraping detail page 2/1155: https://www.local.ch/fr/d/huttwil/4950/veterinaire/tierarztpraxis-dr-marti-ug-rkj9D_7a7_9AtwUu_vQ
+2025-10-17 20:56:01,569 - WARNING - Attempt 1 failed. Retrying in 5 seconds...
+2025-10-17 20:56:17,081 - WARNING - Attempt 2 failed. Retrying in 10 seconds...
+2025-10-17 20:56:37,303 - ERROR - Error processing link https://www.local.ch/fr/d/huttwil/4950/veterinaire/tierarztpraxis-dr-marti-ug-rkj9D_7a7_9AtwUu_vQ: Message: 
+Stacktrace:
+	GetHandleVerifier [0x0x7ff699ede9e5+80021]
+	GetHandleVerifier [0x0x7ff699edea40+80112]
+	(No symbol) [0x0x7ff699c6060f]
+	(No symbol) [0x0x7ff699cb8854]
+	(No symbol) [0x0x7ff699cb8b1c]
+	(No symbol) [0x0x7ff699d0c927]
+	(No symbol) [0x0x7ff699ce126f]
+	(No symbol) [0x0x7ff699d0968a]
+	(No symbol) [0x0x7ff699ce1003]
+	(No symbol) [0x0x7ff699ca95d1]
+	(No symbol) [0x0x7ff699caa3f3]
+	GetHandleVerifier [0x0x7ff69a19dd8d+2960445]
+	GetHandleVerifier [0x0x7ff69a19804a+2936570]
+	GetHandleVerifier [0x0x7ff69a1b8a87+3070263]
+	GetHandleVerifier [0x0x7ff699ef84ce+185214]
+	GetHandleVerifier [0x0x7ff699efff1f+216527]
+	GetHandleVerifier [0x0x7ff699ee7c24+117460]
+	GetHandleVerifier [0x0x7ff699ee7ddf+117903]
+	GetHandleVerifier [0x0x7ff699ecdcb8+11112]
+	BaseThreadInitThunk [0x0x7ffe40897374+20]
+	RtlUserThreadStart [0x0x7ffe4191cc91+33]
+
+2025-10-17 20:56:39,303 - INFO - Scraping detail page 3/1155: https://www.local.ch/fr/d/lumino/6533/veterinaire/studio-veterinario-can-e-gat-EV0om6HsNVOxeRaGmp9oPQ
+2025-10-17 20:56:50,353 - WARNING - Attempt 1 failed. Retrying in 5 seconds...
+2025-10-17 20:57:05,616 - WARNING - Attempt 2 failed. Retrying in 10 seconds...
+2025-10-17 20:57:25,842 - ERROR - Error processing link https://www.local.ch/fr/d/lumino/6533/veterinaire/studio-veterinario-can-e-gat-EV0om6HsNVOxeRaGmp9oPQ: Message: 
+Stacktrace:
+	GetHandleVerifier [0x0x7ff699ede9e5+80021]
+	GetHandleVerifier [0x0x7ff699edea40+80112]
+	(No symbol) [0x0x7ff699c6060f]
+	(No symbol) [0x0x7ff699cb8854]
+	(No symbol) [0x0x7ff699cb8b1c]
+	(No symbol) [0x0x7ff699d0c927]
+	(No symbol) [0x0x7ff699ce126f]
+	(No symbol) [0x0x7ff699d0968a]
+	(No symbol) [0x0x7ff699ce1003]
+	(No symbol) [0x0x7ff699ca95d1]
+	(No symbol) [0x0x7ff699caa3f3]
+	GetHandleVerifier [0x0x7ff69a19dd8d+2960445]
+	GetHandleVerifier [0x0x7ff69a19804a+2936570]
+	GetHandleVerifier [0x0x7ff69a1b8a87+3070263]
+	GetHandleVerifier [0x0x7ff699ef84ce+185214]
+	GetHandleVerifier [0x0x7ff699efff1f+216527]
+	GetHandleVerifier [0x0x7ff699ee7c24+117460]
+	GetHandleVerifier [0x0x7ff699ee7ddf+117903]
+	GetHandleVerifier [0x0x7ff699ecdcb8+11112]
+	BaseThreadInitThunk [0x0x7ffe40897374+20]
+	RtlUserThreadStart [0x0x7ffe4191cc91+33]
+
+2025-10-17 20:57:27,844 - INFO - Scraping detail page 4/1155: https://www.local.ch/fr/d/klosters/7250/veterinaire/silvretta-tieraerzte-ag-tJ1tDJEfybLLENv_sqok_g
+2025-10-17 20:57:38,125 - WARNING - Attempt 1 failed. Retrying in 5 seconds...
+2025-10-17 20:57:53,514 - WARNING - Attempt 2 failed. Retrying in 10 seconds...
+2025-10-17 20:58:13,800 - ERROR - Error processing link https://www.local.ch/fr/d/klosters/7250/veterinaire/silvretta-tieraerzte-ag-tJ1tDJEfybLLENv_sqok_g: Message: 
+Stacktrace:
+	GetHandleVerifier [0x0x7ff699ede9e5+80021]
+	GetHandleVerifier [0x0x7ff699edea40+80112]
+	(No symbol) [0x0x7ff699c6060f]
+	(No symbol) [0x0x7ff699cb8854]
+	(No symbol) [0x0x7ff699cb8b1c]
+	(No symbol) [0x0x7ff699d0c927]
+	(No symbol) [0x0x7ff699ce126f]
+	(No symbol) [0x0x7ff699d0968a]
+	(No symbol) [0x0x7ff699ce1003]
+	(No symbol) [0x0x7ff699ca95d1]
+	(No symbol) [0x0x7ff699caa3f3]
+	GetHandleVerifier [0x0x7ff69a19dd8d+2960445]
+	GetHandleVerifier [0x0x7ff69a19804a+2936570]
+	GetHandleVerifier [0x0x7ff69a1b8a87+3070263]
+	GetHandleVerifier [0x0x7ff699ef84ce+185214]
+	GetHandleVerifier [0x0x7ff699efff1f+216527]
+	GetHandleVerifier [0x0x7ff699ee7c24+117460]
+	GetHandleVerifier [0x0x7ff699ee7ddf+117903]
+	GetHandleVerifier [0x0x7ff699ecdcb8+11112]
+	BaseThreadInitThunk [0x0x7ffe40897374+20]
+	RtlUserThreadStart [0x0x7ffe4191cc91+33]
+
+2025-10-17 20:58:15,801 - INFO - Scraping detail page 5/1155: https://www.local.ch/fr/d/gelterkinden/4460/veterinaire/tierarztpraxis-ergolz-2IhhT8cXrgkBjpjYcGVCAw
+2025-10-17 20:58:26,291 - WARNING - Attempt 1 failed. Retrying in 5 seconds...
+2025-10-17 20:58:41,480 - WARNING - Attempt 2 failed. Retrying in 10 seconds...
+2025-10-17 20:59:01,679 - ERROR - Error processing link https://www.local.ch/fr/d/gelterkinden/4460/veterinaire/tierarztpraxis-ergolz-2IhhT8cXrgkBjpjYcGVCAw: Message: 
+Stacktrace:
+	GetHandleVerifier [0x0x7ff699ede9e5+80021]
+	GetHandleVerifier [0x0x7ff699edea40+80112]
+	(No symbol) [0x0x7ff699c6060f]
+	(No symbol) [0x0x7ff699cb8854]
+	(No symbol) [0x0x7ff699cb8b1c]
+	(No symbol) [0x0x7ff699d0c927]
+	(No symbol) [0x0x7ff699ce126f]
+	(No symbol) [0x0x7ff699d0968a]
+	(No symbol) [0x0x7ff699ce1003]
+	(No symbol) [0x0x7ff699ca95d1]
+	(No symbol) [0x0x7ff699caa3f3]
+	GetHandleVerifier [0x0x7ff69a19dd8d+2960445]
+	GetHandleVerifier [0x0x7ff69a19804a+2936570]
+	GetHandleVerifier [0x0x7ff69a1b8a87+3070263]
+	GetHandleVerifier [0x0x7ff699ef84ce+185214]
+	GetHandleVerifier [0x0x7ff699efff1f+216527]
+	GetHandleVerifier [0x0x7ff699ee7c24+117460]
+	GetHandleVerifier [0x0x7ff699ee7ddf+117903]
+	GetHandleVerifier [0x0x7ff699ecdcb8+11112]
+	BaseThreadInitThunk [0x0x7ffe40897374+20]
+	RtlUserThreadStart [0x0x7ffe4191cc91+33]
+
+2025-10-17 20:59:03,680 - INFO - Scraping detail page 6/1155: https://www.local.ch/fr/d/staffelbach/5053/clinique-pour-animaux/tierklinik24-iveowXePN-7v2Fhm-_V4qw
+2025-10-17 20:59:14,111 - WARNING - Attempt 1 failed. Retrying in 5 seconds...
+2025-10-17 20:59:29,324 - WARNING - Attempt 2 failed. Retrying in 10 seconds...
+2025-10-17 20:59:49,569 - ERROR - Error processing link https://www.local.ch/fr/d/staffelbach/5053/clinique-pour-animaux/tierklinik24-iveowXePN-7v2Fhm-_V4qw: Message: 
+Stacktrace:
+	GetHandleVerifier [0x0x7ff699ede9e5+80021]
+	GetHandleVerifier [0x0x7ff699edea40+80112]
+	(No symbol) [0x0x7ff699c6060f]
+	(No symbol) [0x0x7ff699cb8854]
+	(No symbol) [0x0x7ff699cb8b1c]
+	(No symbol) [0x0x7ff699d0c927]
+	(No symbol) [0x0x7ff699ce126f]
+	(No symbol) [0x0x7ff699d0968a]
+	(No symbol) [0x0x7ff699ce1003]
+	(No symbol) [0x0x7ff699ca95d1]
+	(No symbol) [0x0x7ff699caa3f3]
+	GetHandleVerifier [0x0x7ff69a19dd8d+2960445]
+	GetHandleVerifier [0x0x7ff69a19804a+2936570]
+	GetHandleVerifier [0x0x7ff69a1b8a87+3070263]
+	GetHandleVerifier [0x0x7ff699ef84ce+185214]
+	GetHandleVerifier [0x0x7ff699efff1f+216527]
+	GetHandleVerifier [0x0x7ff699ee7c24+117460]
+	GetHandleVerifier [0x0x7ff699ee7ddf+117903]
+	GetHandleVerifier [0x0x7ff699ecdcb8+11112]
+	BaseThreadInitThunk [0x0x7ffe40897374+20]
+	RtlUserThreadStart [0x0x7ffe4191cc91+33]
+
+2025-10-17 20:59:51,570 - INFO - Scraping detail page 7/1155: https://www.local.ch/fr/d/carouge-ge/1227/service-veterinaire-durgence/vetoadom-sarl-1kUDrbKTr9ZXABUtjQP-Wg
+2025-10-17 21:00:03,141 - WARNING - Attempt 1 failed. Retrying in 5 seconds...
+2025-10-17 21:00:18,380 - WARNING - Attempt 2 failed. Retrying in 10 seconds...
+2025-10-17 21:00:39,078 - ERROR - Error processing link https://www.local.ch/fr/d/carouge-ge/1227/service-veterinaire-durgence/vetoadom-sarl-1kUDrbKTr9ZXABUtjQP-Wg: Message: 
+Stacktrace:
+	GetHandleVerifier [0x0x7ff699ede9e5+80021]
+	GetHandleVerifier [0x0x7ff699edea40+80112]
+	(No symbol) [0x0x7ff699c6060f]
+	(No symbol) [0x0x7ff699cb8854]
+	(No symbol) [0x0x7ff699cb8b1c]
+	(No symbol) [0x0x7ff699d0c927]
+	(No symbol) [0x0x7ff699ce126f]
+	(No symbol) [0x0x7ff699d0968a]
+	(No symbol) [0x0x7ff699ce1003]
+	(No symbol) [0x0x7ff699ca95d1]
+	(No symbol) [0x0x7ff699caa3f3]
+	GetHandleVerifier [0x0x7ff69a19dd8d+2960445]
+	GetHandleVerifier [0x0x7ff69a19804a+2936570]
+	GetHandleVerifier [0x0x7ff69a1b8a87+3070263]
+	GetHandleVerifier [0x0x7ff699ef84ce+185214]
+	GetHandleVerifier [0x0x7ff699efff1f+216527]
+	GetHandleVerifier [0x0x7ff699ee7c24+117460]
+	GetHandleVerifier [0x0x7ff699ee7ddf+117903]
+	GetHandleVerifier [0x0x7ff699ecdcb8+11112]
+	BaseThreadInitThunk [0x0x7ffe40897374+20]
+	RtlUserThreadStart [0x0x7ffe4191cc91+33]
+
+2025-10-17 21:00:41,078 - INFO - Scraping detail page 8/1155: https://www.local.ch/fr/d/flurlingen/8247/veterinaire/tierklinik-rhenus-ag-aoqwfoQ8ahgoToauWoLK3g
+2025-10-17 21:00:51,306 - WARNING - Attempt 1 failed. Retrying in 5 seconds...
+2025-10-17 21:01:06,521 - WARNING - Attempt 2 failed. Retrying in 10 seconds...
+2025-10-17 21:01:26,753 - ERROR - Error processing link https://www.local.ch/fr/d/flurlingen/8247/veterinaire/tierklinik-rhenus-ag-aoqwfoQ8ahgoToauWoLK3g: Message: 
+Stacktrace:
+	GetHandleVerifier [0x0x7ff699ede9e5+80021]
+	GetHandleVerifier [0x0x7ff699edea40+80112]
+	(No symbol) [0x0x7ff699c6060f]
+	(No symbol) [0x0x7ff699cb8854]
+	(No symbol) [0x0x7ff699cb8b1c]
+	(No symbol) [0x0x7ff699d0c927]
+	(No symbol) [0x0x7ff699ce126f]
+	(No symbol) [0x0x7ff699d0968a]
+	(No symbol) [0x0x7ff699ce1003]
+	(No symbol) [0x0x7ff699ca95d1]
+	(No symbol) [0x0x7ff699caa3f3]
+	GetHandleVerifier [0x0x7ff69a19dd8d+2960445]
+	GetHandleVerifier [0x0x7ff69a19804a+2936570]
+	GetHandleVerifier [0x0x7ff69a1b8a87+3070263]
+	GetHandleVerifier [0x0x7ff699ef84ce+185214]
+	GetHandleVerifier [0x0x7ff699efff1f+216527]
+	GetHandleVerifier [0x0x7ff699ee7c24+117460]
+	GetHandleVerifier [0x0x7ff699ee7ddf+117903]
+	GetHandleVerifier [0x0x7ff699ecdcb8+11112]
+	BaseThreadInitThunk [0x0x7ffe40897374+20]
+	RtlUserThreadStart [0x0x7ffe4191cc91+33]
+
+2025-10-17 21:01:28,755 - INFO - Scraping detail page 9/1155: https://www.local.ch/fr/d/kilchberg-zh/8802/veterinaire/tierarzt-kilchberg-LrOnhcVFn3hIrp1zj8WMpA
+2025-10-17 21:01:39,001 - WARNING - Attempt 1 failed. Retrying in 5 seconds...
+2025-10-17 21:01:54,189 - WARNING - Attempt 2 failed. Retrying in 10 seconds...
+2025-10-17 21:02:24,955 - ERROR - Error processing link https://www.local.ch/fr/d/kilchberg-zh/8802/veterinaire/tierarzt-kilchberg-LrOnhcVFn3hIrp1zj8WMpA: Message: 
+Stacktrace:
+	GetHandleVerifier [0x0x7ff699ede9e5+80021]
+	GetHandleVerifier [0x0x7ff699edea40+80112]
+	(No symbol) [0x0x7ff699c6060f]
+	(No symbol) [0x0x7ff699cb8854]
+	(No symbol) [0x0x7ff699cb8b1c]
+	(No symbol) [0x0x7ff699d0c927]
+	(No symbol) [0x0x7ff699ce126f]
+	(No symbol) [0x0x7ff699d0968a]
+	(No symbol) [0x0x7ff699ce1003]
+	(No symbol) [0x0x7ff699ca95d1]
+	(No symbol) [0x0x7ff699caa3f3]
+	GetHandleVerifier [0x0x7ff69a19dd8d+2960445]
+	GetHandleVerifier [0x0x7ff69a19804a+2936570]
+	GetHandleVerifier [0x0x7ff69a1b8a87+3070263]
+	GetHandleVerifier [0x0x7ff699ef84ce+185214]
+	GetHandleVerifier [0x0x7ff699efff1f+216527]
+	GetHandleVerifier [0x0x7ff699ee7c24+117460]
+	GetHandleVerifier [0x0x7ff699ee7ddf+117903]
+	GetHandleVerifier [0x0x7ff699ecdcb8+11112]
+	BaseThreadInitThunk [0x0x7ffe40897374+20]
+	RtlUserThreadStart [0x0x7ffe4191cc91+33]
+
+2025-10-17 21:02:26,955 - INFO - Scraping detail page 10/1155: https://www.local.ch/fr/d/anet/3232/veterinaire/kleintierpraxis-im-moos-ag-NRtxWqsElcqWnP_jNW_HHQ
+2025-10-17 21:02:37,618 - WARNING - Attempt 1 failed. Retrying in 5 seconds...

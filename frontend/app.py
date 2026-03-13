@@ -69,51 +69,111 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, check_webs
             check_bienvivre=check_bienvivre
         )
 
-        # Monkey-patch the scraper to save to MongoDB instead of Excel
-        original_scrape = scraper.scrape
+        # Setup driver first
+        scraper.setup_driver()
 
-        def scrape_with_db(*args, **kwargs):
+        # Get total companies to scrape
+        company_links = scraper.search_by_keyword(max_pages=max_pages)
+        total_to_scrape = len(company_links)
+        if max_companies and max_companies > 0:
+            total_to_scrape = min(max_companies, total_to_scrape)
+
+        # Update job with total expected companies
+        jobs_collection.update_one(
+            {'_id': ObjectId(job_id)},
+            {'$set': {'total_companies': total_to_scrape, 'companies_scraped': 0}}
+        )
+
+        # Monkey-patch the scrape_detail_page method to save incrementally
+        original_scrape_detail = scraper.scrape_detail_page
+
+        def scrape_detail_with_save(url):
             # Run original scrape
-            original_scrape(*args, **kwargs)
+            detail_data = original_scrape_detail(url)
 
-            # Save results to MongoDB
-            for result in scraper.results:
-                result['job_id'] = ObjectId(job_id)
-                result['keyword'] = keyword
-                result['created_at'] = datetime.now()
-                result['status'] = 'new'
-                result['user_notes'] = ''
-                companies_collection.insert_one(result)
+            if detail_data:
+                # Save to MongoDB immediately
+                detail_data['job_id'] = ObjectId(job_id)
+                detail_data['keyword'] = keyword
+                detail_data['created_at'] = datetime.now()
+                detail_data['status'] = 'new'
+                detail_data['user_notes'] = ''
+                companies_collection.insert_one(detail_data)
 
-            # Update job status
-            jobs_collection.update_one(
-                {'_id': ObjectId(job_id)},
-                {
-                    '$set': {
-                        'status': 'completed',
-                        'completed_at': datetime.now(),
-                        'total_companies': len(scraper.results),
-                        'progress': 100
-                    }
+                # Update job progress
+                companies_scraped = companies_collection.count_documents({'job_id': ObjectId(job_id)})
+                jobs_collection.update_one(
+                    {'_id': ObjectId(job_id)},
+                    {'$set': {'companies_scraped': companies_scraped}}
+                )
+
+            return detail_data
+
+        scraper.scrape_detail_page = scrape_detail_with_save
+
+        # Now scrape the companies (we already have the links)
+        # We need to manually iterate through company_links instead of calling scrape()
+        if max_companies and max_companies > 0:
+            max_companies_to_process = min(max_companies, len(company_links))
+        else:
+            max_companies_to_process = len(company_links)
+
+        for i, link in enumerate(company_links[:max_companies_to_process], 1):
+            if link in scraper.processed_urls:
+                continue
+
+            scraper.logger.info(f"Scraping company {i}/{max_companies_to_process}: {link}")
+
+            try:
+                detail_data = scraper.scrape_detail_page(link)
+
+                if detail_data:
+                    scraper.results.append(detail_data)
+                    scraper.processed_urls.add(link)
+
+            except Exception as e:
+                scraper.logger.error(f"Error processing link {link}: {str(e)}")
+                continue
+
+            # Random delay to avoid being blocked
+            import random
+            import time
+            delay = random.uniform(1, 2)
+            time.sleep(delay)
+
+        # Final update - mark as completed
+        companies_scraped = companies_collection.count_documents({'job_id': ObjectId(job_id)})
+        jobs_collection.update_one(
+            {'_id': ObjectId(job_id)},
+            {
+                '$set': {
+                    'status': 'completed',
+                    'completed_at': datetime.now(),
+                    'total_companies': companies_scraped,
+                    'companies_scraped': companies_scraped,
+                    'progress': 100
                 }
-            )
-
-        scraper.scrape = scrape_with_db
-        scraper.scrape(max_search_pages=max_pages, max_companies=max_companies)
+            }
+        )
 
     except Exception as e:
         # Update job with error
+        companies_scraped = companies_collection.count_documents({'job_id': ObjectId(job_id)})
         jobs_collection.update_one(
             {'_id': ObjectId(job_id)},
             {
                 '$set': {
                     'status': 'failed',
                     'error_message': str(e),
-                    'completed_at': datetime.now()
+                    'completed_at': datetime.now(),
+                    'companies_scraped': companies_scraped
                 }
             }
         )
     finally:
+        # Close the driver
+        if scraper and scraper.driver:
+            scraper.driver.quit()
         # Remove from active threads
         if job_id in active_threads:
             del active_threads[job_id]
@@ -166,6 +226,7 @@ def start_scrape():
         'status': 'pending',
         'progress': 0,
         'total_companies': 0,
+        'companies_scraped': 0,
         'created_at': datetime.now(),
         'started_at': None,
         'completed_at': None,

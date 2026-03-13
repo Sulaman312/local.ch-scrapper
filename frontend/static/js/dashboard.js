@@ -9,8 +9,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Set up form submission
     document.getElementById('scrapeForm').addEventListener('submit', handleStartScrape);
 
-    // Auto-refresh jobs every 30 seconds
-    setInterval(loadJobs, 30000);
+    // Auto-refresh jobs (interval will be adjusted based on active jobs)
+    window.jobsRefreshInterval = setInterval(loadJobs, 30000);
 });
 
 // Load dashboard statistics
@@ -39,6 +39,16 @@ async function loadJobs() {
 
         renderActiveJobs(activeJobs);
         renderRecentJobs(completedJobs);
+
+        // If there are active jobs, refresh more frequently (every 5 seconds)
+        if (activeJobs.length > 0) {
+            clearInterval(window.jobsRefreshInterval);
+            window.jobsRefreshInterval = setInterval(loadJobs, 5000);
+        } else {
+            // Otherwise, slower refresh (every 30 seconds)
+            clearInterval(window.jobsRefreshInterval);
+            window.jobsRefreshInterval = setInterval(loadJobs, 30000);
+        }
     } catch (error) {
         console.error('Error loading jobs:', error);
     }
@@ -58,7 +68,12 @@ function renderActiveJobs(jobs) {
         return;
     }
 
-    container.innerHTML = jobs.map(job => `
+    container.innerHTML = jobs.map(job => {
+        const companiesScraped = job.companies_scraped || 0;
+        const totalCompanies = job.total_companies || 0;
+        const percentage = totalCompanies > 0 ? Math.round((companiesScraped / totalCompanies) * 100) : 0;
+
+        return `
         <div class="job-card">
             <div class="job-header">
                 <div class="job-title">
@@ -67,15 +82,25 @@ function renderActiveJobs(jobs) {
             </div>
             <div class="job-meta">
                 Started: ${formatDate(job.started_at || job.created_at)} •
-                ${job.total_companies || 0} companies
+                ${companiesScraped}${totalCompanies > 0 ? `/${totalCompanies}` : ''} companies scraped
             </div>
-            ${job.status === 'running' ? `
+            ${job.status === 'running' && totalCompanies > 0 ? `
                 <div class="progress-bar">
-                    <div class="progress-fill" style="width: ${job.progress || 0}%"></div>
+                    <div class="progress-fill" style="width: ${percentage}%"></div>
+                </div>
+                <div style="text-align: center; font-size: 0.875rem; color: var(--text-gray); margin-top: 0.25rem;">
+                    ${percentage}% complete
+                </div>
+            ` : ''}
+            ${companiesScraped > 0 ? `
+                <div class="job-actions" style="margin-top: 0.75rem;">
+                    <a href="/results?job_id=${job._id}" class="btn btn-sm btn-primary">
+                        <i class="fas fa-eye"></i> View Progress (${companiesScraped} companies)
+                    </a>
                 </div>
             ` : ''}
         </div>
-    `).join('');
+    `}).join('');
 }
 
 // Render recent completed jobs

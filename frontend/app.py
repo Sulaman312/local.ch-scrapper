@@ -122,6 +122,21 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, check_webs
             if link in scraper.processed_urls:
                 continue
 
+            # Restart Chrome every 10 companies to prevent memory issues
+            if i > 1 and (i - 1) % 10 == 0:
+                scraper.logger.info(f"Restarting Chrome after {i - 1} companies to clear memory...")
+                try:
+                    if scraper.driver:
+                        scraper.driver.quit()
+                    import time
+                    time.sleep(2)  # Wait for cleanup
+                    scraper.setup_driver()
+                    scraper.logger.info("Chrome restarted successfully")
+                except Exception as e:
+                    scraper.logger.error(f"Error restarting Chrome: {str(e)}")
+                    # Try to continue anyway
+                    pass
+
             scraper.logger.info(f"Scraping company {i}/{max_companies_to_process}: {link}")
 
             try:

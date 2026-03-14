@@ -2,7 +2,10 @@
 const API_BASE = '';
 
 // Load stats on page load
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    // Initialize i18n first
+    await window.i18n.initI18n();
+
     loadStats();
     loadJobs();
 
@@ -62,7 +65,7 @@ function renderActiveJobs(jobs) {
         container.innerHTML = `
             <div class="empty-state">
                 <div class="empty-state-icon"><i class="fas fa-clock" style="font-size: 3rem; color: var(--text-gray);"></i></div>
-                <div class="empty-state-text">No active jobs</div>
+                <div class="empty-state-text">${window.i18n.t('activeJobs.noActiveJobs')}</div>
             </div>
         `;
         return;
@@ -73,6 +76,14 @@ function renderActiveJobs(jobs) {
         const totalCompanies = job.total_companies || 0;
         const percentage = totalCompanies > 0 ? Math.round((companiesScraped / totalCompanies) * 100) : 0;
 
+        // Determine status message
+        let statusMessage;
+        if (totalCompanies === 0 && companiesScraped === 0) {
+            statusMessage = `<i class="fas fa-search"></i> ${window.i18n.t('activeJobs.gatheringCompanies')}`;
+        } else {
+            statusMessage = `${companiesScraped}${totalCompanies > 0 ? `/${totalCompanies}` : ''} ${window.i18n.t('activeJobs.companiesScraped')}`;
+        }
+
         return `
         <div class="job-card">
             <div class="job-header">
@@ -81,24 +92,29 @@ function renderActiveJobs(jobs) {
                 </div>
             </div>
             <div class="job-meta">
-                Started: ${formatDate(job.started_at || job.created_at)} •
-                ${companiesScraped}${totalCompanies > 0 ? `/${totalCompanies}` : ''} companies scraped
+                ${window.i18n.t('activeJobs.started')}: ${formatDate(job.started_at || job.created_at)} •
+                ${statusMessage}
             </div>
             ${job.status === 'running' && totalCompanies > 0 ? `
                 <div class="progress-bar">
                     <div class="progress-fill" style="width: ${percentage}%"></div>
                 </div>
                 <div style="text-align: center; font-size: 0.875rem; color: var(--text-gray); margin-top: 0.25rem;">
-                    ${percentage}% complete
+                    ${percentage}% ${window.i18n.t('activeJobs.complete')}
                 </div>
             ` : ''}
-            ${companiesScraped > 0 ? `
-                <div class="job-actions" style="margin-top: 0.75rem;">
+            <div class="job-actions" style="margin-top: 0.75rem; display: flex; gap: 0.5rem;">
+                ${companiesScraped > 0 ? `
                     <a href="/results?job_id=${job._id}" class="btn btn-sm btn-primary">
-                        <i class="fas fa-eye"></i> View Progress (${companiesScraped} companies)
+                        <i class="fas fa-eye"></i> ${window.i18n.t('activeJobs.viewProgress')} (${companiesScraped} companies)
                     </a>
-                </div>
-            ` : ''}
+                ` : ''}
+                ${job.status === 'running' ? `
+                    <button class="btn btn-sm btn-secondary" onclick="stopJob('${job._id}', '${job.keyword}')">
+                        <i class="fas fa-stop"></i> ${window.i18n.t('activeJobs.stopJob')}
+                    </button>
+                ` : ''}
+            </div>
         </div>
     `}).join('');
 }
@@ -111,7 +127,7 @@ function renderRecentJobs(jobs) {
         container.innerHTML = `
             <div class="empty-state">
                 <div class="empty-state-icon"><i class="fas fa-clipboard-list" style="font-size: 3rem; color: var(--text-gray);"></i></div>
-                <div class="empty-state-text">No completed jobs yet</div>
+                <div class="empty-state-text">${window.i18n.t('recentJobs.noCompletedJobs')}</div>
             </div>
         `;
         return;
@@ -125,17 +141,17 @@ function renderRecentJobs(jobs) {
                 </div>
             </div>
             <div class="job-meta">
-                Completed: ${formatDate(job.completed_at)} •
-                ${job.total_companies || 0} companies scraped
-                ${job.error_message ? `<br><span style="color: var(--accent-red);">Error: ${job.error_message}</span>` : ''}
+                ${window.i18n.t('recentJobs.completed')}: ${formatDate(job.completed_at)} •
+                ${job.total_companies || 0} ${window.i18n.t('activeJobs.companiesScraped')}
+                ${job.error_message ? `<br><span style="color: var(--accent-red);">${window.i18n.t('recentJobs.error')}: ${job.error_message}</span>` : ''}
             </div>
             ${job.status === 'completed' ? `
                 <div class="job-actions">
                     <a href="/results?job_id=${job._id}" class="btn btn-sm btn-primary">
-                        <i class="fas fa-eye"></i> View Results
+                        <i class="fas fa-eye"></i> ${window.i18n.t('recentJobs.viewResults')}
                     </a>
                     <button class="btn btn-sm btn-secondary" onclick="downloadResults('${job.keyword}')">
-                        <i class="fas fa-download"></i> Download Excel
+                        <i class="fas fa-download"></i> ${window.i18n.t('recentJobs.downloadExcel')}
                     </button>
                 </div>
             ` : ''}
@@ -166,7 +182,7 @@ async function handleStartScrape(e) {
 
     const startBtn = document.getElementById('startBtn');
     startBtn.disabled = true;
-    startBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting...';
+    startBtn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${window.i18n.t('scrapeForm.starting')}`;
 
     try {
         const response = await fetch(`${API_BASE}/api/scrape/start`, {
@@ -188,7 +204,7 @@ async function handleStartScrape(e) {
         const data = await response.json();
 
         if (data.success) {
-            showAlert(`Scraping job started for "${keyword}"! You'll see the results here when done.`, 'success');
+            showAlert(window.i18n.t('alerts.jobStarted', {keyword}), 'success');
 
             // Reset form
             document.getElementById('scrapeForm').reset();
@@ -203,7 +219,7 @@ async function handleStartScrape(e) {
         showAlert('Failed to start scraping job. Check console for details.', 'error');
     } finally {
         startBtn.disabled = false;
-        startBtn.innerHTML = '<i class="fas fa-play"></i> Start Scraping';
+        startBtn.innerHTML = `<i class="fas fa-play"></i> ${window.i18n.t('scrapeForm.startScraping')}`;
     }
 }
 
@@ -212,11 +228,57 @@ async function downloadResults(keyword) {
     window.location.href = `${API_BASE}/api/export?keyword=${encodeURIComponent(keyword)}`;
 }
 
+// Stop a running job
+async function stopJob(jobId, keyword) {
+    showConfirm(
+        `Are you sure you want to stop the scraping job for "${keyword}"?\n\nAll data scraped so far will be saved.`,
+        async () => {
+            try {
+                const response = await fetch(`${API_BASE}/api/scrape/jobs/${jobId}/stop`, {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showAlert(window.i18n.t('alerts.jobStopped', {count: data.companies_scraped || 0}), 'success');
+                    loadJobs();
+                } else {
+                    showAlert('Error: ' + (data.error || 'Failed to stop job'), 'error');
+                }
+            } catch (error) {
+                console.error('Error stopping job:', error);
+                showAlert('Failed to stop job. Check console for details.', 'error');
+            }
+        }
+    );
+}
+
+// Logout function
+async function logout(event) {
+    if (event) event.preventDefault();
+
+    try {
+        await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST' });
+        window.location.href = '/login';
+    } catch (error) {
+        console.error('Logout error:', error);
+        window.location.href = '/login';
+    }
+}
+
 // Format date helper
 function formatDate(dateStr) {
     if (!dateStr) return 'N/A';
 
+    // Parse the date string - handle ISO format properly
     const date = new Date(dateStr);
+
+    // Check if date is valid
+    if (isNaN(date.getTime())) {
+        return 'Invalid date';
+    }
+
     const now = new Date();
     const diffMs = now - date;
     const diffMins = Math.floor(diffMs / 60000);

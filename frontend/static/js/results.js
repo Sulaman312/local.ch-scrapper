@@ -9,7 +9,26 @@ let totalResults = 0;
 let currentFilters = {};
 
 // Load page
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    // Initialize i18n first
+    await window.i18n.initI18n();
+
+    // Check user role and hide/show dashboard link
+    try {
+        const response = await fetch(`${API_BASE}/api/auth/me`);
+        const data = await response.json();
+
+        if (data.authenticated && data.role === 'user') {
+            // Hide dashboard link for regular users
+            const dashboardLink = document.getElementById('dashboardLink');
+            if (dashboardLink) {
+                dashboardLink.style.display = 'none';
+            }
+        }
+    } catch (error) {
+        console.error('Error checking auth:', error);
+    }
+
     // Check if job_id in URL
     const urlParams = new URLSearchParams(window.location.search);
     const jobId = urlParams.get('job_id');
@@ -30,6 +49,19 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('resetFiltersBtn').addEventListener('click', resetFilters);
 });
 
+// Logout function
+async function logout(event) {
+    if (event) event.preventDefault();
+
+    try {
+        await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST' });
+        window.location.href = '/login';
+    } catch (error) {
+        console.error('Logout error:', error);
+        window.location.href = '/login';
+    }
+}
+
 // Load all jobs
 async function loadJobs() {
     try {
@@ -46,7 +78,7 @@ async function loadJobs() {
                     <td colspan="5" style="text-align: center; padding: 3rem;">
                         <div class="empty-state">
                             <div class="empty-state-icon"><i class="fas fa-folder-open" style="font-size: 3rem; color: var(--text-gray);"></i></div>
-                            <div class="empty-state-text">No scraping jobs yet</div>
+                            <div class="empty-state-text">${window.i18n.t('results.noScrapingJobs')}</div>
                         </div>
                     </td>
                 </tr>
@@ -61,7 +93,7 @@ async function loadJobs() {
                 <td>${job.total_companies || 0}</td>
                 <td>${job.status.charAt(0).toUpperCase() + job.status.slice(1)}</td>
                 <td>
-                    ${job.status === 'completed' ? `
+                    ${job.status === 'completed' || job.status === 'stopped' || job.status === 'failed' ? `
                         <button class="btn btn-sm btn-primary" onclick="viewJobResults('${job._id}')">
                             <i class="fas fa-eye"></i> View
                         </button>
@@ -99,11 +131,26 @@ async function viewJobResults(jobId) {
         const job = await jobResponse.json();
         document.getElementById('currentJobKeyword').textContent = job.keyword;
 
+        // Show/hide stop button based on job status
+        const stopJobBtn = document.getElementById('stopJobBtn');
+        if (job.status === 'running') {
+            stopJobBtn.style.display = 'inline-block';
+            stopJobBtn.setAttribute('data-job-id', job._id);
+            stopJobBtn.setAttribute('data-keyword', job.keyword);
+        } else {
+            stopJobBtn.style.display = 'none';
+        }
+
         // Populate language filter options
         await populateLanguageFilter();
 
         // Load companies
         loadCompanies();
+
+        // Auto-refresh if job is running
+        if (job.status === 'running') {
+            setTimeout(() => viewJobResults(jobId), 5000);
+        }
     } catch (error) {
         console.error('Error loading job:', error);
     }
@@ -664,6 +711,36 @@ function formatDate(dateStr) {
 }
 
 // Delete job
+async function stopCurrentJob() {
+    const stopBtn = document.getElementById('stopJobBtn');
+    const jobId = stopBtn.getAttribute('data-job-id');
+    const keyword = stopBtn.getAttribute('data-keyword');
+
+    showConfirm(
+        `Are you sure you want to stop the scraping job for "${keyword}"?\n\nAll data scraped so far will be saved.`,
+        async () => {
+            try {
+                const response = await fetch(`${API_BASE}/api/scrape/jobs/${jobId}/stop`, {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showAlert(`Job stopped successfully. ${data.companies_scraped || 0} companies were scraped.`, 'success');
+                    // Reload job details
+                    viewJobResults(jobId);
+                } else {
+                    showAlert('Error: ' + (data.error || 'Failed to stop job'), 'error');
+                }
+            } catch (error) {
+                console.error('Error stopping job:', error);
+                showAlert('Failed to stop job. Check console for details.', 'error');
+            }
+        }
+    );
+}
+
 async function deleteJob(jobId, keyword) {
     showConfirm(
         `Are you sure you want to delete the "${keyword}" job and all its companies?\n\nThis action cannot be undone.`,

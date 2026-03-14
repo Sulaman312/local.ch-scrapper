@@ -8,18 +8,30 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
 </head>
 <body>
+    <!-- Language Selector -->
+    <div class="language-selector">
+        <select id="langSelect" class="language-dropdown">
+            <option value="en">EN</option>
+            <option value="fr" selected>FR</option>
+        </select>
+    </div>
+
     <aside class="sidebar">
         <div class="sidebar-header">
-            <h1><i class="fas fa-search"></i> Local.ch Scraper</h1>
+            <h1><i class="fas fa-search"></i> <span data-i18n="sidebar.title">Local.ch Scraper</span></h1>
         </div>
         <nav class="sidebar-nav">
-            <a href="/" class="nav-link">
+            <a href="/" class="nav-link" id="dashboardLink">
                 <i class="fas fa-home"></i>
-                <span>Dashboard</span>
+                <span data-i18n="sidebar.dashboard">Dashboard</span>
             </a>
             <a href="/results" class="nav-link active">
                 <i class="fas fa-table"></i>
-                <span>Browse Results</span>
+                <span data-i18n="sidebar.browseResults">Browse Results</span>
+            </a>
+            <a href="#" class="nav-link logout" onclick="logout(event)">
+                <i class="fas fa-sign-out-alt"></i>
+                <span data-i18n="sidebar.logout">Logout</span>
             </a>
         </nav>
     </aside>
@@ -30,11 +42,11 @@
             <!-- Job Selection View -->
             <div id="jobsView">
                 <div class="card">
-                    <h2 class="card-header">Your Scraping Jobs</h2>
+                    <h2 class="card-header" data-i18n="results.yourScrapingJobs">Your Scraping Jobs</h2>
 
                     <div class="flex-between mb-2">
                         <div>
-                            <strong id="jobsCount">0</strong> scraping jobs
+                            <strong id="jobsCount">0</strong> <span data-i18n="results.scrapingJobs">scraping jobs</span>
                         </div>
                     </div>
 
@@ -42,11 +54,11 @@
                         <table class="table" id="jobsTable">
                             <thead>
                                 <tr>
-                                    <th>Keyword</th>
-                                    <th>Date</th>
-                                    <th>Companies</th>
-                                    <th>Status</th>
-                                    <th>Actions</th>
+                                    <th data-i18n="results.keyword">Keyword</th>
+                                    <th data-i18n="results.date">Date</th>
+                                    <th data-i18n="results.companies">Companies</th>
+                                    <th data-i18n="results.status">Status</th>
+                                    <th data-i18n="results.actions">Actions</th>
                                 </tr>
                             </thead>
                             <tbody id="jobsBody">
@@ -67,7 +79,7 @@
                     <div class="flex-between">
                         <div>
                             <button class="btn btn-secondary" onclick="backToJobs()">
-                                <i class="fas fa-arrow-left"></i> Back to Jobs
+                                <i class="fas fa-arrow-left"></i> <span data-i18n="results.backToJobs">Back to Jobs</span>
                             </button>
                         </div>
                         <div>
@@ -75,9 +87,12 @@
                                 <i class="fas fa-folder-open"></i> <span id="currentJobKeyword"></span>
                             </h3>
                         </div>
-                        <div>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <button class="btn btn-secondary" id="stopJobBtn" onclick="stopCurrentJob()" style="display: none;">
+                                <i class="fas fa-stop"></i> <span data-i18n="results.stopJob">Stop Job</span>
+                            </button>
                             <button class="btn btn-success" id="exportJobBtn">
-                                <i class="fas fa-download"></i> Export to Excel
+                                <i class="fas fa-download"></i> <span data-i18n="results.exportToExcel">Export to Excel</span>
                             </button>
                         </div>
                     </div>
@@ -85,26 +100,27 @@
 
                 <!-- Filters Card -->
                 <div class="card mb-2">
-                    <h3 class="card-header">Filters</h3>
+                    <h3 class="card-header" data-i18n="results.filters">Filters</h3>
 
                     <div class="filter-grid">
                         <!-- City Filter -->
                         <div class="form-group">
-                            <label class="form-label">City</label>
+                            <label class="form-label" data-i18n="results.city">City</label>
                             <input
                                 type="text"
                                 class="form-input"
                                 id="filterCity"
+                                data-i18n-placeholder="results.searchByCity"
                                 placeholder="Search by city..."
                             >
                         </div>
 
                         <!-- Language Filter -->
                         <div class="form-group">
-                            <label class="form-label">Language</label>
+                            <label class="form-label" data-i18n="results.language">Language</label>
                             <div class="custom-multi-select">
                                 <div class="multi-select-trigger" id="languageTrigger">
-                                    <span id="languageDisplay">Choose languages</span>
+                                    <span id="languageDisplay" data-i18n="results.chooseLanguages">Choose languages</span>
                                     <i class="fas fa-chevron-down"></i>
                                 </div>
                                 <div class="multi-select-dropdown" id="languageDropdown" style="display: none;">
@@ -115,7 +131,7 @@
 
                         <!-- Rows Per Page -->
                         <div class="form-group">
-                            <label class="form-label">Rows Per Page</label>
+                            <label class="form-label" data-i18n="results.rowsPerPage">Rows Per Page</label>
                             <select class="form-select" id="filterRowsPerPage">
                                 <option value="10">10</option>
                                 <option value="25" selected>25</option>
@@ -126,31 +142,31 @@
 
                         <!-- Has Local Search Filter -->
                         <div class="form-group">
-                            <label class="form-label">Has Local Search</label>
+                            <label class="form-label" data-i18n="results.hasLocalSearch">Has Local Search</label>
                             <select class="form-select" id="filterLocalSearch">
-                                <option value="any" selected>Any</option>
-                                <option value="true">True</option>
-                                <option value="false">False</option>
+                                <option value="any" selected data-i18n="results.any">Any</option>
+                                <option value="true" data-i18n="results.true">True</option>
+                                <option value="false" data-i18n="results.false">False</option>
                             </select>
                         </div>
 
                         <!-- Has Social Media Filter -->
                         <div class="form-group">
-                            <label class="form-label">Has Social Media</label>
+                            <label class="form-label" data-i18n="results.hasSocialMedia">Has Social Media</label>
                             <select class="form-select" id="filterSocialMedia">
-                                <option value="any" selected>Any</option>
-                                <option value="true">True</option>
-                                <option value="false">False</option>
+                                <option value="any" selected data-i18n="results.any">Any</option>
+                                <option value="true" data-i18n="results.true">True</option>
+                                <option value="false" data-i18n="results.false">False</option>
                             </select>
                         </div>
                     </div>
 
                     <div class="flex gap-2 mt-2">
                         <button class="btn btn-primary" id="applyFiltersBtn">
-                            <i class="fas fa-filter"></i> Apply Filters
+                            <i class="fas fa-filter"></i> <span data-i18n="results.applyFilters">Apply Filters</span>
                         </button>
                         <button class="btn btn-secondary" id="resetFiltersBtn">
-                            <i class="fas fa-redo"></i> Reset
+                            <i class="fas fa-redo"></i> <span data-i18n="results.resetFilters">Reset</span>
                         </button>
                     </div>
                 </div>
@@ -170,19 +186,19 @@
                     <table class="table" id="resultsTable">
                         <thead>
                             <tr>
-                                <th>Score</th>
-                                <th>Company</th>
-                                <th>City</th>
-                                <th>Phone</th>
-                                <th>Email</th>
-                                <th>Website</th>
-                                <th>Reviews</th>
-                                <th>Rating</th>
-                                <th>Social Media</th>
-                                <th>Local Search</th>
-                                <th>Architectes</th>
-                                <th>Bienvivre</th>
-                                <th>Actions</th>
+                                <th data-i18n="results.score">Score</th>
+                                <th data-i18n="results.company">Company</th>
+                                <th data-i18n="results.cityColumn">City</th>
+                                <th data-i18n="results.phone">Phone</th>
+                                <th data-i18n="results.email">Email</th>
+                                <th data-i18n="results.website">Website</th>
+                                <th data-i18n="results.reviews">Reviews</th>
+                                <th data-i18n="results.rating">Rating</th>
+                                <th data-i18n="results.socialMedia">Social Media</th>
+                                <th data-i18n="results.localSearch">Local Search</th>
+                                <th data-i18n="results.architectes">Architectes</th>
+                                <th data-i18n="results.bienvivre">Bienvivre</th>
+                                <th data-i18n="results.actions">Actions</th>
                             </tr>
                         </thead>
                         <tbody id="resultsBody">
@@ -222,6 +238,7 @@
         </div>
     </div>
 
+    <script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
     <script src="{{ url_for('static', filename='js/modal.js') }}"></script>
     <script src="{{ url_for('static', filename='js/results.js') }}"></script>
 </body>

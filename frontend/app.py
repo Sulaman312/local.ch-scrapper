@@ -3,12 +3,12 @@
 Flask Backend for Local.ch Scraper Dashboard
 """
 
-from flask import Flask, render_template, request, jsonify, send_file, Response
+from flask import Flask, render_template, request, jsonify, send_file, Response, session, redirect, url_for
 from flask_cors import CORS
 from pymongo import MongoClient
 from bson import ObjectId
 from bson import json_util
-from datetime import datetime
+from datetime import datetime, timezone
 import sys
 import os
 import threading
@@ -16,6 +16,7 @@ import pandas as pd
 from io import BytesIO
 from dotenv import load_dotenv
 import json
+from functools import wraps
 
 # Load environment variables from .env file
 load_dotenv()
@@ -27,6 +28,9 @@ from scraper import LocalChScraper
 app = Flask(__name__)
 CORS(app)
 
+# Secret key for session management
+app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production-12345')
+
 # MongoDB Connection
 MONGO_URI = os.getenv('MONGO_URI', 'mongodb://localhost:27017/')
 client = MongoClient(MONGO_URI)
@@ -34,8 +38,58 @@ db = client['localch_scraper']
 jobs_collection = db['scrape_jobs']
 companies_collection = db['companies']
 
-# Active scraping threads
+# Active scraping threads and stop flags
 active_threads = {}
+stop_flags = {}
+
+# Hardcoded users - in production, use database with hashed passwords
+USERS = {
+    'admin': {
+        'password': 'Admin@12345',
+        'role': 'admin'
+    },
+    'user': {
+        'password': 'User@12345',
+        'role': 'user'
+    }
+}
+
+# Authentication decorators
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'username' not in session:
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'username' not in session:
+            return redirect(url_for('login'))
+        if session.get('role') != 'admin':
+            return redirect(url_for('results'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def api_login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'username' not in session:
+            return jsonify({'error': 'Authentication required'}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+def api_admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'username' not in session:
+            return jsonify({'error': 'Authentication required'}), 401
+        if session.get('role') != 'admin':
+            return jsonify({'error': 'Admin access required'}), 403
+        return f(*args, **kwargs)
+    return decorated_function
 
 # Custom JSON encoder for Flask 3.0
 from flask.json.provider import DefaultJSONProvider
@@ -57,7 +111,7 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, check_webs
         # Update job status to running
         jobs_collection.update_one(
             {'_id': ObjectId(job_id)},
-            {'$set': {'status': 'running', 'started_at': datetime.now()}}
+            {'$set': {'status': 'running', 'started_at': datetime.now(timezone.utc)}}
         )
 
         # Create scraper instance
@@ -95,7 +149,7 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, check_webs
                 # Save to MongoDB immediately
                 detail_data['job_id'] = ObjectId(job_id)
                 detail_data['keyword'] = keyword
-                detail_data['created_at'] = datetime.now()
+                detail_data['created_at'] = datetime.now(timezone.utc)
                 detail_data['status'] = 'new'
                 detail_data['user_notes'] = ''
                 companies_collection.insert_one(detail_data)
@@ -119,6 +173,11 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, check_webs
             max_companies_to_process = len(company_links)
 
         for i, link in enumerate(company_links[:max_companies_to_process], 1):
+            # Check if job should be stopped
+            if job_id in stop_flags and stop_flags[job_id]:
+                scraper.logger.info(f"Job {job_id} stopped by user request")
+                break
+
             if link in scraper.processed_urls:
                 continue
 
@@ -156,14 +215,22 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, check_webs
             delay = random.uniform(1, 2)
             time.sleep(delay)
 
-        # Final update - mark as completed
+        # Final update - mark as completed or stopped
         companies_scraped = companies_collection.count_documents({'job_id': ObjectId(job_id)})
+
+        # Check if job was stopped by user
+        if job_id in stop_flags and stop_flags[job_id]:
+            status = 'stopped'
+            del stop_flags[job_id]
+        else:
+            status = 'completed'
+
         jobs_collection.update_one(
             {'_id': ObjectId(job_id)},
             {
                 '$set': {
-                    'status': 'completed',
-                    'completed_at': datetime.now(),
+                    'status': status,
+                    'completed_at': datetime.now(timezone.utc),
                     'total_companies': companies_scraped,
                     'companies_scraped': companies_scraped,
                     'progress': 100
@@ -180,7 +247,7 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, check_webs
                 '$set': {
                     'status': 'failed',
                     'error_message': str(e),
-                    'completed_at': datetime.now(),
+                    'completed_at': datetime.now(timezone.utc),
                     'companies_scraped': companies_scraped
                 }
             }
@@ -189,28 +256,92 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, check_webs
         # Close the driver
         if scraper and scraper.driver:
             scraper.driver.quit()
-        # Remove from active threads
+        # Clean up flags and threads
+        if job_id in stop_flags:
+            del stop_flags[job_id]
         if job_id in active_threads:
             del active_threads[job_id]
 
 
 # ============= Routes =============
 
+@app.route('/login')
+def login():
+    """Login page"""
+    # If already logged in, redirect based on role
+    if 'username' in session:
+        if session.get('role') == 'admin':
+            return redirect(url_for('index'))
+        else:
+            return redirect(url_for('results'))
+    return render_template('login.html')
+
+
 @app.route('/')
+@admin_required
 def index():
-    """Main dashboard page"""
+    """Main dashboard page - Admin only"""
     return render_template('index.html')
 
 
 @app.route('/results')
+@login_required
 def results():
-    """Results browser page"""
+    """Results browser page - All authenticated users"""
     return render_template('results.html')
 
 
 # ============= API Endpoints =============
 
+@app.route('/api/auth/login', methods=['POST'])
+def api_login():
+    """Handle login requests"""
+    data = request.json
+    username = data.get('username', '').strip()
+    password = data.get('password', '')
+
+    if not username or not password:
+        return jsonify({'success': False, 'error': 'Username and password are required'}), 400
+
+    # Check credentials
+    user = USERS.get(username)
+    if user and user['password'] == password:
+        # Set session
+        session['username'] = username
+        session['role'] = user['role']
+        session.permanent = True  # Makes session persist
+
+        return jsonify({
+            'success': True,
+            'username': username,
+            'role': user['role']
+        })
+    else:
+        return jsonify({'success': False, 'error': 'Invalid username or password'}), 401
+
+
+@app.route('/api/auth/logout', methods=['POST'])
+def api_logout():
+    """Handle logout requests"""
+    session.clear()
+    return jsonify({'success': True})
+
+
+@app.route('/api/auth/me', methods=['GET'])
+def api_me():
+    """Get current user info"""
+    if 'username' in session:
+        return jsonify({
+            'authenticated': True,
+            'username': session['username'],
+            'role': session['role']
+        })
+    else:
+        return jsonify({'authenticated': False}), 401
+
+
 @app.route('/api/scrape/start', methods=['POST'])
+@api_admin_required
 def start_scrape():
     """Start a new scraping job"""
     data = request.json
@@ -242,7 +373,7 @@ def start_scrape():
         'progress': 0,
         'total_companies': 0,
         'companies_scraped': 0,
-        'created_at': datetime.now(),
+        'created_at': datetime.now(timezone.utc),
         'started_at': None,
         'completed_at': None,
         'error_message': None
@@ -268,6 +399,7 @@ def start_scrape():
 
 
 @app.route('/api/scrape/jobs', methods=['GET'])
+@api_login_required
 def get_jobs():
     """Get all scraping jobs"""
     jobs = list(jobs_collection.find().sort('created_at', -1).limit(20))
@@ -275,6 +407,7 @@ def get_jobs():
 
 
 @app.route('/api/scrape/jobs/<job_id>', methods=['GET'])
+@api_login_required
 def get_job(job_id):
     """Get specific job details"""
     job = jobs_collection.find_one({'_id': ObjectId(job_id)})
@@ -284,6 +417,7 @@ def get_job(job_id):
 
 
 @app.route('/api/companies', methods=['GET'])
+@api_login_required
 def get_companies():
     """Get companies with filters"""
     try:
@@ -367,6 +501,7 @@ def get_companies():
 
 
 @app.route('/api/companies/<company_id>', methods=['GET'])
+@api_login_required
 def get_company(company_id):
     """Get specific company details"""
     company = companies_collection.find_one({'_id': ObjectId(company_id)})
@@ -376,6 +511,7 @@ def get_company(company_id):
 
 
 @app.route('/api/companies/<company_id>/notes', methods=['PUT'])
+@api_login_required
 def update_company_notes(company_id):
     """Update company notes and status"""
     data = request.json
@@ -398,6 +534,7 @@ def update_company_notes(company_id):
 
 
 @app.route('/api/export', methods=['GET'])
+@api_login_required
 def export_companies():
     """Export filtered companies to Excel"""
     # Get same filters as get_companies
@@ -464,7 +601,37 @@ def export_companies():
     )
 
 
+@app.route('/api/scrape/jobs/<job_id>/stop', methods=['POST'])
+@api_admin_required
+def stop_job(job_id):
+    """Stop a running scraping job"""
+    try:
+        # Check if job exists and is running
+        job = jobs_collection.find_one({'_id': ObjectId(job_id)})
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+
+        if job['status'] not in ['pending', 'running']:
+            return jsonify({'error': 'Job is not running'}), 400
+
+        # Set stop flag
+        stop_flags[job_id] = True
+
+        # Get current progress
+        companies_scraped = companies_collection.count_documents({'job_id': ObjectId(job_id)})
+
+        return jsonify({
+            'success': True,
+            'message': 'Job stop requested',
+            'companies_scraped': companies_scraped
+        })
+    except Exception as e:
+        print(f"Error stopping job: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/scrape/jobs/<job_id>', methods=['DELETE'])
+@api_admin_required
 def delete_job(job_id):
     """Delete a job and all its associated companies"""
     try:
@@ -489,6 +656,7 @@ def delete_job(job_id):
 
 
 @app.route('/api/stats', methods=['GET'])
+@api_login_required
 def get_stats():
     """Get dashboard statistics"""
     keyword = request.args.get('keyword')

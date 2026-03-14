@@ -8,18 +8,30 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
 </head>
 <body>
+    <!-- Language Selector -->
+    <div class="language-selector">
+        <select id="langSelect" class="language-dropdown">
+            <option value="en">EN</option>
+            <option value="fr" selected>FR</option>
+        </select>
+    </div>
+
     <aside class="sidebar">
         <div class="sidebar-header">
-            <h1><i class="fas fa-search"></i> Local.ch Scraper</h1>
+            <h1><i class="fas fa-search"></i> <span data-i18n="sidebar.title">Local.ch Scraper</span></h1>
         </div>
         <nav class="sidebar-nav">
             <a href="/" class="nav-link active">
                 <i class="fas fa-home"></i>
-                <span>Dashboard</span>
+                <span data-i18n="sidebar.dashboard">Dashboard</span>
             </a>
             <a href="/results" class="nav-link">
                 <i class="fas fa-table"></i>
-                <span>Browse Results</span>
+                <span data-i18n="sidebar.browseResults">Browse Results</span>
+            </a>
+            <a href="#" class="nav-link logout" onclick="logout(event)">
+                <i class="fas fa-sign-out-alt"></i>
+                <span data-i18n="sidebar.logout">Logout</span>
             </a>
         </nav>
     </aside>
@@ -30,34 +42,35 @@
             <!-- Dashboard Stats -->
             <div class="stats-grid">
                 <div class="stat-card">
-                    <div class="stat-label">Total Companies</div>
+                    <div class="stat-label" data-i18n="stats.totalCompanies">Total Companies</div>
                     <div class="stat-value" id="statTotalCompanies">0</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Avg Credibility Score</div>
+                    <div class="stat-label" data-i18n="stats.avgCredibilityScore">Avg Credibility Score</div>
                     <div class="stat-value" id="statAvgScore">0</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">With Social Media</div>
+                    <div class="stat-label" data-i18n="stats.withSocialMedia">With Social Media</div>
                     <div class="stat-value" id="statSocialMedia">0</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">With Local Search</div>
+                    <div class="stat-label" data-i18n="stats.withLocalSearch">With Local Search</div>
                     <div class="stat-value" id="statLocalSearch">0</div>
                 </div>
             </div>
 
             <!-- New Scraping Job -->
             <div class="card">
-                <h2 class="card-header">Start New Scraping Job</h2>
+                <h2 class="card-header" data-i18n="scrapeForm.title">Start New Scraping Job</h2>
                 <form id="scrapeForm">
                     <div class="form-row">
                         <div class="form-group" style="flex: 2;">
-                            <label class="form-label">Keyword *</label>
+                            <label class="form-label"><span data-i18n="scrapeForm.keyword">Keyword</span> *</label>
                             <input
                                 type="text"
                                 class="form-input"
                                 id="keyword"
+                                data-i18n-placeholder="scrapeForm.keywordPlaceholder"
                                 placeholder="e.g., plumber, dentist, restaurant..."
                                 required
                             >
@@ -65,70 +78,72 @@
                     </div>
                     <div class="form-row">
                         <div class="form-group">
-                            <label class="form-label">Max Pages</label>
+                            <label class="form-label" data-i18n="scrapeForm.maxPages">Max Pages</label>
                             <input
                                 type="number"
                                 class="form-input"
                                 id="maxPages"
+                                data-i18n-placeholder="scrapeForm.maxPagesPlaceholder"
                                 placeholder="Leave blank for all"
                                 min="1"
                             >
-                            <small style="color: var(--text-gray); font-size: 0.75rem;">Optional - scrapes all pages if left blank</small>
+                            <small style="color: var(--text-gray); font-size: 0.75rem;" data-i18n="scrapeForm.maxPagesHint">Optional - scrapes all pages if left blank</small>
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Max Companies</label>
+                            <label class="form-label" data-i18n="scrapeForm.maxCompanies">Max Companies</label>
                             <input
                                 type="number"
                                 class="form-input"
                                 id="maxCompanies"
+                                data-i18n-placeholder="scrapeForm.maxCompaniesPlaceholder"
                                 placeholder="Leave blank for all"
                                 min="1"
                             >
-                            <small style="color: var(--text-gray); font-size: 0.75rem;">Optional - scrapes all found if left blank</small>
+                            <small style="color: var(--text-gray); font-size: 0.75rem;" data-i18n="scrapeForm.maxCompaniesHint">Optional - scrapes all found if left blank</small>
                         </div>
                     </div>
                     <div class="form-group">
-                        <label class="form-label" style="margin-bottom: 0.75rem;">Optional Data Enrichment</label>
+                        <label class="form-label" style="margin-bottom: 0.75rem;" data-i18n="scrapeForm.optionalDataEnrichment">Optional Data Enrichment</label>
                         <div style="display: flex; flex-direction: column; gap: 0.5rem;">
                             <label class="checkbox-option">
                                 <input type="checkbox" id="checkWebsites">
-                                <span>Check company websites for Local Search indicators</span>
+                                <span data-i18n="scrapeForm.checkWebsites">Check company websites for Local Search indicators</span>
                             </label>
                             <label class="checkbox-option">
                                 <input type="checkbox" id="checkMoneyhouse">
-                                <span>Check Moneyhouse.ch for person/management data</span>
+                                <span data-i18n="scrapeForm.checkMoneyhouse">Check Moneyhouse.ch for person/management data</span>
                             </label>
                             <label class="checkbox-option">
                                 <input type="checkbox" id="checkArchitectes">
-                                <span>Check Architectes.ch presence</span>
+                                <span data-i18n="scrapeForm.checkArchitectes">Check Architectes.ch presence</span>
                             </label>
                             <label class="checkbox-option">
                                 <input type="checkbox" id="checkBienvivre">
-                                <span>Check Editions-bienvivre.ch presence</span>
+                                <span data-i18n="scrapeForm.checkBienvivre">Check Editions-bienvivre.ch presence</span>
                             </label>
                         </div>
-                        <small style="color: var(--text-gray); font-size: 0.75rem;">All options disabled by default for faster scraping</small>
+                        <small style="color: var(--text-gray); font-size: 0.75rem;" data-i18n="scrapeForm.enrichmentHint">All options disabled by default for faster scraping</small>
                     </div>
                     <button type="submit" class="btn btn-primary" id="startBtn">
-                        <i class="fas fa-play"></i> Start Scraping
+                        <i class="fas fa-play"></i> <span data-i18n="scrapeForm.startScraping">Start Scraping</span>
                     </button>
                 </form>
             </div>
 
             <!-- Active Jobs -->
             <div class="card">
-                <h2 class="card-header">Active Jobs</h2>
+                <h2 class="card-header" data-i18n="activeJobs.title">Active Jobs</h2>
                 <div id="activeJobs">
                     <div class="empty-state">
                         <div class="empty-state-icon">⏳</div>
-                        <div class="empty-state-text">No active jobs</div>
+                        <div class="empty-state-text" data-i18n="activeJobs.noActiveJobs">No active jobs</div>
                     </div>
                 </div>
             </div>
 
             <!-- Recent Completed Jobs -->
             <div class="card">
-                <h2 class="card-header">Recent Jobs</h2>
+                <h2 class="card-header" data-i18n="recentJobs.title">Recent Jobs</h2>
                 <div id="recentJobs">
                     <div class="spinner"></div>
                 </div>
@@ -136,6 +151,7 @@
         </main>
     </div>
 
+    <script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
     <script src="{{ url_for('static', filename='js/modal.js') }}"></script>
     <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 </body>

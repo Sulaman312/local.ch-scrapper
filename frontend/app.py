@@ -403,6 +403,14 @@ def start_scrape():
 def get_jobs():
     """Get all scraping jobs"""
     jobs = list(jobs_collection.find().sort('created_at', -1).limit(20))
+    # Convert datetime objects to ISO format strings with UTC timezone
+    for job in jobs:
+        if 'created_at' in job and job['created_at']:
+            job['created_at'] = job['created_at'].isoformat() if hasattr(job['created_at'], 'isoformat') else job['created_at']
+        if 'started_at' in job and job['started_at']:
+            job['started_at'] = job['started_at'].isoformat() if hasattr(job['started_at'], 'isoformat') else job['started_at']
+        if 'completed_at' in job and job['completed_at']:
+            job['completed_at'] = job['completed_at'].isoformat() if hasattr(job['completed_at'], 'isoformat') else job['completed_at']
     return jsonify(jobs)
 
 
@@ -413,6 +421,13 @@ def get_job(job_id):
     job = jobs_collection.find_one({'_id': ObjectId(job_id)})
     if not job:
         return jsonify({'error': 'Job not found'}), 404
+    # Convert datetime objects to ISO format strings with UTC timezone
+    if 'created_at' in job and job['created_at']:
+        job['created_at'] = job['created_at'].isoformat() if hasattr(job['created_at'], 'isoformat') else job['created_at']
+    if 'started_at' in job and job['started_at']:
+        job['started_at'] = job['started_at'].isoformat() if hasattr(job['started_at'], 'isoformat') else job['started_at']
+    if 'completed_at' in job and job['completed_at']:
+        job['completed_at'] = job['completed_at'].isoformat() if hasattr(job['completed_at'], 'isoformat') else job['completed_at']
     return jsonify(job)
 
 
@@ -597,7 +612,7 @@ def export_companies():
         output,
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         as_attachment=True,
-        download_name=f'localch_export_{export_name}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+        download_name=f'localch_export_{export_name}_{datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")}.xlsx'
     )
 
 

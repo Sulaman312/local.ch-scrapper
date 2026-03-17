@@ -14,9 +14,24 @@ from functools import wraps
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import urllib3
+import random
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# List of realistic user agents for rotation
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64; rv:122.0) Gecko/20100101 Firefox/122.0',
+]
 
 def retry_on_exception(retries=3, delay=5):
     """Retry decorator with exponential backoff."""
@@ -77,7 +92,11 @@ class LocalChScraper:
         options.add_argument('--disable-blink-features=AutomationControlled')
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
-        options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+        # Randomly select a user agent from the list
+        user_agent = random.choice(USER_AGENTS)
+        options.add_argument(f'--user-agent={user_agent}')
+        self.logger.info(f"Using User-Agent: {user_agent}")
 
         # For Railway/production - use system chromium and chromedriver
         service = None
@@ -101,8 +120,8 @@ class LocalChScraper:
                 self.driver = webdriver.Chrome(options=options)
 
             self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            self.driver.implicitly_wait(10)
-            self.driver.set_page_load_timeout(30)
+            self.driver.implicitly_wait(1)
+            self.driver.set_page_load_timeout(15)
             self.logger.info("WebDriver initialized successfully")
         except Exception as e:
             self.logger.error(f"Failed to initialize WebDriver: {str(e)}")
@@ -163,7 +182,6 @@ class LocalChScraper:
                 self.logger.info(f"Scraping search results page {page_number}: {url}")
 
                 self.driver.get(url)
-                time.sleep(3)  # Wait for page to load
 
                 # Find all company listing cards
                 cards = self.driver.find_elements(By.CSS_SELECTOR, "article[data-testid^='list-element']")
@@ -194,7 +212,6 @@ class LocalChScraper:
                         break
 
                     page_number += 1
-                    time.sleep(2)  # Be nice to the server
 
                 except Exception:
                     break
@@ -326,7 +343,6 @@ class LocalChScraper:
 
             # Use Selenium to visit the website (avoids 403 errors)
             self.driver.get(website_url)
-            time.sleep(2)  # Wait for page to load
 
             # Get page source
             page_source = self.driver.page_source
@@ -357,7 +373,6 @@ class LocalChScraper:
                 try:
                     self.logger.info(f"    Navigating to legal page: {legal_url}")
                     self.driver.get(legal_url)
-                    time.sleep(2)  # Wait for page to load
 
                     # Get page source
                     legal_page_source = self.driver.page_source
@@ -479,7 +494,7 @@ class LocalChScraper:
 
             # Wait for search results to load (language-agnostic selector)
             try:
-                WebDriverWait(self.driver, 10).until(
+                WebDriverWait(self.driver, 3).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/company/']"))
                 )
                 self.logger.info(f"    Search results loaded")
@@ -522,7 +537,7 @@ class LocalChScraper:
 
             # Wait for person table to load
             try:
-                WebDriverWait(self.driver, 10).until(
+                WebDriverWait(self.driver, 3).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "tbody.person"))
                 )
             except:
@@ -707,7 +722,6 @@ class LocalChScraper:
 
             self.logger.info(f"    Searching DuckDuckGo: {ddg_url}")
             self.driver.get(ddg_url)
-            time.sleep(1)  # Wait for page to load (reduced from 3)
 
             # DuckDuckGo uses different selectors - try multiple approaches
             # Try to find any search results
@@ -885,17 +899,13 @@ class LocalChScraper:
             return False
 
         try:
-            # Short wait for popup to appear
-            time.sleep(1)
-
             # Try to click "Tout refuser" (Refuse All) to avoid tracking
             try:
-                refuse_button = WebDriverWait(self.driver, 3).until(
+                refuse_button = WebDriverWait(self.driver, 1).until(
                     EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Tout refuser')]"))
                 )
                 refuse_button.click()
                 self.logger.info("Clicked 'Tout refuser' on cookie consent")
-                time.sleep(1)
                 self.cookie_consent_handled = True
                 return True
             except:
@@ -903,12 +913,11 @@ class LocalChScraper:
 
             # If that fails, try to click "J'accepte" (Accept)
             try:
-                accept_button = WebDriverWait(self.driver, 2).until(
+                accept_button = WebDriverWait(self.driver, 0.5).until(
                     EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'accepte')]"))
                 )
                 accept_button.click()
                 self.logger.info("Clicked 'J'accepte' on cookie consent")
-                time.sleep(1)
                 self.cookie_consent_handled = True
                 return True
             except:
@@ -934,7 +943,7 @@ class LocalChScraper:
 
             # Wait for page to load
             try:
-                WebDriverWait(self.driver, 15).until(
+                WebDriverWait(self.driver, 5).until(
                     EC.any_of(
                         EC.presence_of_element_located((By.CLASS_NAME, "detail_detail__SXBfi")),
                         EC.presence_of_element_located((By.CSS_SELECTOR, "[data-cy='header-title']")),
@@ -943,7 +952,6 @@ class LocalChScraper:
                 )
             except TimeoutException:
                 self.logger.warning(f"Page load timeout for {url}")
-                time.sleep(3)
 
         except Exception as e:
             self.logger.error(f"Error loading page {url}: {str(e)}")
@@ -1183,7 +1191,7 @@ class LocalChScraper:
         detail_data['has_social_media'] = any(social_media_links.values())
 
         # Restore implicit wait before any further navigation
-        self.driver.implicitly_wait(10)
+        self.driver.implicitly_wait(1)
 
         # If website exists and check_websites is enabled, check for Local Search and copyright year
         if self.check_websites and detail_data['website']:

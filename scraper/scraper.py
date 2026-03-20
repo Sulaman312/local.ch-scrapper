@@ -91,6 +91,8 @@ class LocalChScraper:
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-blink-features=AutomationControlled')
+        options.add_argument('--ignore-certificate-errors')  # Handle SSL/TLS issues
+        options.add_argument('--allow-insecure-localhost')
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
 
@@ -190,7 +192,8 @@ class LocalChScraper:
                 self.driver.get(url)
 
                 # Find all company detail links directly (more stable than iterating through cards)
-                link_elements = self.driver.find_elements(By.CSS_SELECTOR, "article[data-testid^='list-element'] a[href*='/d/']")
+                # Use more specific selector to get only the main company link (not images/buttons)
+                link_elements = self.driver.find_elements(By.CSS_SELECTOR, "article[data-testid^='list-element'] > a[href*='/d/']")
 
                 if not link_elements:
                     self.logger.info(f"No more results found on page {page_number}")

@@ -191,6 +191,16 @@ class LocalChScraper:
 
                 self.driver.get(url)
 
+                # Wait for the page to load the listings
+                try:
+                    from selenium.webdriver.support.ui import WebDriverWait
+                    from selenium.webdriver.support import expected_conditions as EC
+                    WebDriverWait(self.driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "article[data-testid^='list-element']"))
+                    )
+                except:
+                    pass  # Continue even if wait times out
+
                 # Find all company detail links directly (more stable than iterating through cards)
                 # Use more specific selector to get only the main company link (not images/buttons)
                 link_elements = self.driver.find_elements(By.CSS_SELECTOR, "article[data-testid^='list-element'] > a[href*='/d/']")
@@ -203,16 +213,20 @@ class LocalChScraper:
 
                 # Extract all href attributes immediately to avoid stale element issues
                 page_links_before = len(company_links)
+                page_hrefs = []
                 for link_elem in link_elements:
                     try:
                         link = link_elem.get_attribute('href')
-                        if link and link not in company_links:
-                            company_links.append(link)
+                        if link:
+                            page_hrefs.append(link)
+                            if link not in company_links:
+                                company_links.append(link)
                     except Exception:
                         continue
 
                 new_links = len(company_links) - page_links_before
-                self.logger.info(f"Added {new_links} new unique company links from page {page_number}")
+                unique_on_page = len(set(page_hrefs))
+                self.logger.info(f"Added {new_links} new unique company links from page {page_number} (found {unique_on_page} unique URLs on this page)")
 
                 # Check if there's a next page
                 try:

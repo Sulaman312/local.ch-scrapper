@@ -26,9 +26,11 @@
     "checkMoneyhouse": "Vérifier Moneyhouse.ch pour les données de personne/gestion",
     "checkArchitectes": "Vérifier la présence sur Architectes.ch",
     "checkBienvivre": "Vérifier la présence sur Editions-bienvivre.ch",
+    "checkZip": "Vérifier la présence sur Zip.ch",
     "enrichmentHint": "Toutes les options désactivées par défaut pour une extraction plus rapide",
     "startScraping": "Démarrer l'extraction",
-    "starting": "Démarrage..."
+    "starting": "Démarrage...",
+    "checking": "Vérification..."
   },
   "activeJobs": {
     "title": "Travaux actifs",
@@ -109,6 +111,7 @@
     "socialMedia": "Réseaux Sociaux",
     "localSearch": "Local Search",
     "architectes": "Architectes",
-    "bienvivre": "Bienvivre"
+    "bienvivre": "Bienvivre",
+    "zip": "Zip.ch"
   }
 }

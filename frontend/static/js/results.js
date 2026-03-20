@@ -249,6 +249,7 @@ function renderResults(companies) {
                 <td>${renderBooleanBadge(company.has_local_search)}</td>
                 <td>${renderBooleanBadge(company.on_architectes_ch)}</td>
                 <td>${renderBooleanBadge(company.on_bienvivre_ch)}</td>
+                <td>${renderBooleanBadge(company.zip)}</td>
                 <td>
                     <button class="btn btn-sm btn-primary" onclick="viewCompany('${company._id}')">
                         <i class="fas fa-eye"></i>
@@ -324,10 +325,10 @@ function renderBooleanBadge(value) {
     if (value === 'N/A') {
         return `<span class="badge" style="background: #f3f4f6; color: #6b7280;">N/A</span>`;
     }
-    if (value === true || value === 'true') {
-        return `<span class="badge" style="background: #d1fae5; color: #065f46;">TRUE</span>`;
+    if (value === true || value === 'true' || value === 'Yes') {
+        return `<span class="badge" style="background: #d1fae5; color: #065f46;">YES</span>`;
     }
-    return `<span class="badge" style="background: #fee2e2; color: #991b1b;">FALSE</span>`;
+    return `<span class="badge" style="background: #fee2e2; color: #991b1b;">NO</span>`;
 }
 
 // Get score class for styling
@@ -433,6 +434,10 @@ async function viewCompany(companyId) {
                         <tr style="border-bottom: 1px solid var(--border-gray);">
                             <td style="padding: 0.75rem 0; font-weight: 600;">On Bienvivre.ch</td>
                             <td style="padding: 0.75rem 0;">${renderBooleanBadge(company.on_bienvivre_ch)}</td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid var(--border-gray);">
+                            <td style="padding: 0.75rem 0; font-weight: 600;">Zip.ch</td>
+                            <td style="padding: 0.75rem 0;">${renderBooleanBadge(company.zip)}</td>
                         </tr>
                         ${company.languages && company.languages.length > 0 ? `
                         <tr style="border-bottom: 1px solid var(--border-gray);">

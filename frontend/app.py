@@ -105,7 +105,7 @@ class CustomJSONProvider(DefaultJSONProvider):
 app.json = CustomJSONProvider(app)
 
 
-def run_scraper_background(job_id, keyword, max_pages, max_companies, check_websites=False, check_moneyhouse=False, check_architectes=False, check_bienvivre=False):
+def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page=1, check_websites=False, check_moneyhouse=False, check_architectes=False, check_bienvivre=False, check_zip=False):
     """Run scraper in background and save results to MongoDB"""
     try:
         # Update job status to running
@@ -120,14 +120,15 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, check_webs
             check_websites=check_websites,
             check_moneyhouse=check_moneyhouse,
             check_architectes=check_architectes,
-            check_bienvivre=check_bienvivre
+            check_bienvivre=check_bienvivre,
+            check_zip=check_zip
         )
 
         # Setup driver first
         scraper.setup_driver()
 
         # Get total companies to scrape
-        company_links = scraper.search_by_keyword(max_pages=max_pages)
+        company_links = scraper.search_by_keyword(max_pages=max_pages, start_page=start_page)
         total_to_scrape = len(company_links)
         if max_companies and max_companies > 0:
             total_to_scrape = min(max_companies, total_to_scrape)
@@ -340,6 +341,40 @@ def api_me():
         return jsonify({'authenticated': False}), 401
 
 
+@app.route('/api/scrape/check-keyword', methods=['POST'])
+@api_admin_required
+def check_keyword():
+    """Check if keyword was scraped in the past week"""
+    data = request.json
+    keyword = data.get('keyword', '').strip()
+
+    if not keyword:
+        return jsonify({'exists': False})
+
+    # Check for jobs with same keyword in the past 7 days
+    from datetime import timedelta
+    one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+
+    existing_job = jobs_collection.find_one(
+        {
+            'keyword': keyword,
+            'created_at': {'$gte': one_week_ago},
+            'status': {'$in': ['completed', 'stopped']}
+        },
+        sort=[('created_at', -1)]
+    )
+
+    if existing_job:
+        return jsonify({
+            'exists': True,
+            'last_max_pages': existing_job.get('max_pages', 0),
+            'job_id': str(existing_job['_id']),
+            'created_at': existing_job['created_at'].isoformat() if hasattr(existing_job['created_at'], 'isoformat') else existing_job['created_at']
+        })
+
+    return jsonify({'exists': False})
+
+
 @app.route('/api/scrape/start', methods=['POST'])
 @api_admin_required
 def start_scrape():
@@ -352,10 +387,14 @@ def start_scrape():
     max_companies = data.get('max_companies')
     if max_companies is not None:
         max_companies = int(max_companies)
+    start_page = data.get('start_page', 1)
+    if start_page is not None:
+        start_page = int(start_page)
     check_websites = data.get('check_websites', False)
     check_moneyhouse = data.get('check_moneyhouse', False)
     check_architectes = data.get('check_architectes', False)
     check_bienvivre = data.get('check_bienvivre', False)
+    check_zip = data.get('check_zip', False)
 
     if not keyword:
         return jsonify({'error': 'Keyword is required'}), 400
@@ -365,10 +404,12 @@ def start_scrape():
         'keyword': keyword,
         'max_pages': max_pages,
         'max_companies': max_companies,
+        'start_page': start_page,
         'check_websites': check_websites,
         'check_moneyhouse': check_moneyhouse,
         'check_architectes': check_architectes,
         'check_bienvivre': check_bienvivre,
+        'check_zip': check_zip,
         'status': 'pending',
         'progress': 0,
         'total_companies': 0,
@@ -385,7 +426,7 @@ def start_scrape():
     # Start scraper in background thread
     thread = threading.Thread(
         target=run_scraper_background,
-        args=(job_id, keyword, max_pages, max_companies, check_websites, check_moneyhouse, check_architectes, check_bienvivre)
+        args=(job_id, keyword, max_pages, max_companies, start_page, check_websites, check_moneyhouse, check_architectes, check_bienvivre, check_zip)
     )
     thread.daemon = True
     thread.start()

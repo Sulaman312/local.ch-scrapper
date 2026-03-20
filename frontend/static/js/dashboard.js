@@ -159,6 +159,189 @@ function renderRecentJobs(jobs) {
     `).join('');
 }
 
+// Show continue prompt modal
+async function showContinuePrompt(keyword, lastMaxPages, newMaxPages) {
+    const endPage = newMaxPages ? (lastMaxPages + newMaxPages) : '?';
+    const lang = window.i18n?.currentLang || 'fr';
+
+    return new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 10000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        `;
+
+        const titleText = lang === 'fr' ? 'Mot-clé déjà extrait' : 'Keyword Already Scraped';
+        const descText = lang === 'fr'
+            ? `Vous avez déjà extrait "<strong>${keyword}</strong>" récemment (${lastMaxPages} pages).${newMaxPages ? `<br><br>Si vous continuez, il extraira les pages <strong>${lastMaxPages + 1}-${endPage}</strong>.` : ''}`
+            : `You've already scraped "<strong>${keyword}</strong>" recently (${lastMaxPages} pages).${newMaxPages ? `<br><br>If you continue, it will scrape pages <strong>${lastMaxPages + 1}-${endPage}</strong>.` : ''}`;
+        const continueText = lang === 'fr' ? `Continuer depuis la page ${lastMaxPages + 1}` : `Continue from Page ${lastMaxPages + 1}`;
+        const freshText = lang === 'fr' ? 'Recommencer depuis la page 1' : 'Start Fresh from Page 1';
+        const cancelText = lang === 'fr' ? 'Annuler' : 'Cancel';
+
+        modal.innerHTML = `
+            <div style="
+                background: white;
+                border-radius: 0.75rem;
+                padding: 2rem;
+                max-width: 500px;
+                width: 90%;
+                box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+            ">
+                <div style="text-align: center; margin-bottom: 1.5rem; font-size: 3rem;">
+                    <i class="fas fa-info-circle" style="color: var(--navbar-primary);"></i>
+                </div>
+                <h3 style="
+                    margin: 0 0 1rem 0;
+                    text-align: center;
+                    color: var(--text-dark);
+                    font-size: 1.25rem;
+                    font-weight: 600;
+                ">${titleText}</h3>
+                <div style="
+                    text-align: center;
+                    color: var(--text-gray);
+                    line-height: 1.6;
+                    margin-bottom: 1.5rem;
+                ">
+                    ${descText}
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+                    <button id="continueBtn" style="
+                        width: 100%;
+                        padding: 0.75rem;
+                        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+                        color: white;
+                        border: none;
+                        border-radius: 0.5rem;
+                        font-size: 0.875rem;
+                        font-weight: 500;
+                        cursor: pointer;
+                        font-family: 'Inter', sans-serif;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        gap: 0.5rem;
+                    ">
+                        <i class="fas fa-play"></i> ${continueText}
+                    </button>
+                    <button id="freshBtn" style="
+                        width: 100%;
+                        padding: 0.75rem;
+                        background: linear-gradient(135deg, var(--navbar-primary) 0%, var(--navbar-secondary) 100%);
+                        color: white;
+                        border: none;
+                        border-radius: 0.5rem;
+                        font-size: 0.875rem;
+                        font-weight: 500;
+                        cursor: pointer;
+                        font-family: 'Inter', sans-serif;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        gap: 0.5rem;
+                    ">
+                        <i class="fas fa-redo"></i> ${freshText}
+                    </button>
+                    <button id="cancelBtn" style="
+                        width: 100%;
+                        padding: 0.75rem;
+                        background: var(--bg-gray);
+                        color: var(--text-dark);
+                        border: none;
+                        border-radius: 0.5rem;
+                        font-size: 0.875rem;
+                        font-weight: 500;
+                        cursor: pointer;
+                        font-family: 'Inter', sans-serif;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        gap: 0.5rem;
+                    ">
+                        <i class="fas fa-times"></i> ${cancelText}
+                    </button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        const cancelBtn = modal.querySelector('#cancelBtn');
+        const freshBtn = modal.querySelector('#freshBtn');
+        const continueBtn = modal.querySelector('#continueBtn');
+
+        const cleanup = () => {
+            document.body.removeChild(modal);
+        };
+
+        cancelBtn.addEventListener('click', () => {
+            cleanup();
+            resolve('cancel');
+        });
+
+        freshBtn.addEventListener('click', () => {
+            cleanup();
+            resolve('fresh');
+        });
+
+        continueBtn.addEventListener('click', () => {
+            cleanup();
+            resolve('continue');
+        });
+
+        // Hover effects
+        continueBtn.addEventListener('mouseenter', () => {
+            continueBtn.style.opacity = '0.9';
+        });
+        continueBtn.addEventListener('mouseleave', () => {
+            continueBtn.style.opacity = '1';
+        });
+
+        freshBtn.addEventListener('mouseenter', () => {
+            freshBtn.style.opacity = '0.9';
+        });
+        freshBtn.addEventListener('mouseleave', () => {
+            freshBtn.style.opacity = '1';
+        });
+
+        cancelBtn.addEventListener('mouseenter', () => {
+            cancelBtn.style.background = 'var(--border-gray)';
+        });
+        cancelBtn.addEventListener('mouseleave', () => {
+            cancelBtn.style.background = 'var(--bg-gray)';
+        });
+
+        // Close on background click
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                cleanup();
+                resolve('cancel');
+            }
+        });
+
+        // Focus the continue button
+        setTimeout(() => continueBtn.focus(), 100);
+
+        // Keyboard navigation
+        document.addEventListener('keydown', function handleKeydown(e) {
+            if (e.key === 'Escape') {
+                cleanup();
+                resolve('cancel');
+                document.removeEventListener('keydown', handleKeydown);
+            }
+        });
+    });
+}
+
 // Handle start scrape form submission
 async function handleStartScrape(e) {
     e.preventDefault();
@@ -174,6 +357,7 @@ async function handleStartScrape(e) {
     const checkMoneyhouse = document.getElementById('checkMoneyhouse').checked;
     const checkArchitectes = document.getElementById('checkArchitectes').checked;
     const checkBienvivre = document.getElementById('checkBienvivre').checked;
+    const checkZip = document.getElementById('checkZip').checked;
 
     if (!keyword) {
         showAlert('Please enter a keyword', 'warning');
@@ -182,9 +366,46 @@ async function handleStartScrape(e) {
 
     const startBtn = document.getElementById('startBtn');
     startBtn.disabled = true;
-    startBtn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${window.i18n.t('scrapeForm.starting')}`;
+    startBtn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${window.i18n.t('scrapeForm.checking', 'Checking...')}`;
+
+    let startPage = 1;
+    let adjustedMaxPages = maxPages;
 
     try {
+        // Check if keyword was scraped recently
+        const checkResponse = await fetch(`${API_BASE}/api/scrape/check-keyword`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ keyword })
+        });
+
+        const checkData = await checkResponse.json();
+
+        // If keyword exists, prompt user
+        if (checkData.exists && checkData.last_max_pages) {
+            const continueChoice = await showContinuePrompt(keyword, checkData.last_max_pages, maxPages);
+
+            if (continueChoice === 'cancel') {
+                startBtn.disabled = false;
+                startBtn.innerHTML = `<i class="fas fa-play"></i> ${window.i18n.t('scrapeForm.startScraping')}`;
+                return;
+            } else if (continueChoice === 'continue') {
+                startPage = checkData.last_max_pages + 1;
+                // CRITICAL: Adjust max_pages to be the total end page
+                if (maxPages) {
+                    adjustedMaxPages = checkData.last_max_pages + maxPages;
+                }
+            }
+            // If 'fresh', startPage remains 1 and maxPages unchanged
+        }
+    } catch (checkError) {
+        console.error('Error checking keyword:', checkError);
+        // Continue with normal scraping if check fails
+    }
+
+    try {
+        startBtn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${window.i18n.t('scrapeForm.starting')}`;
+
         const response = await fetch(`${API_BASE}/api/scrape/start`, {
             method: 'POST',
             headers: {
@@ -192,12 +413,14 @@ async function handleStartScrape(e) {
             },
             body: JSON.stringify({
                 keyword,
-                max_pages: maxPages,
+                max_pages: adjustedMaxPages,
                 max_companies: maxCompanies,
+                start_page: startPage,
                 check_websites: checkWebsites,
                 check_moneyhouse: checkMoneyhouse,
                 check_architectes: checkArchitectes,
-                check_bienvivre: checkBienvivre
+                check_bienvivre: checkBienvivre,
+                check_zip: checkZip
             })
         });
 

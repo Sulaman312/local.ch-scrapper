@@ -26,9 +26,11 @@
     "checkMoneyhouse": "Check Moneyhouse.ch for person/management data",
     "checkArchitectes": "Check Architectes.ch presence",
     "checkBienvivre": "Check Editions-bienvivre.ch presence",
+    "checkZip": "Check Zip.ch presence",
     "enrichmentHint": "All options disabled by default for faster scraping",
     "startScraping": "Start Scraping",
-    "starting": "Starting..."
+    "starting": "Starting...",
+    "checking": "Checking..."
   },
   "activeJobs": {
     "title": "Active Jobs",
@@ -109,6 +111,7 @@
     "socialMedia": "Social Media",
     "localSearch": "Local Search",
     "architectes": "Architectes",
-    "bienvivre": "Bienvivre"
+    "bienvivre": "Bienvivre",
+    "zip": "Zip.ch"
   }
 }

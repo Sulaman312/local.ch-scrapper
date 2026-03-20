@@ -54,12 +54,13 @@ def retry_on_exception(retries=3, delay=5):
     return decorator
 
 class LocalChScraper:
-    def __init__(self, keyword="plumber", check_websites=False, check_moneyhouse=False, check_architectes=False, check_bienvivre=False):
+    def __init__(self, keyword="plumber", check_websites=False, check_moneyhouse=False, check_architectes=False, check_bienvivre=False, check_zip=False):
         self.keyword = keyword
         self.check_websites = check_websites
         self.check_moneyhouse = check_moneyhouse
         self.check_architectes = check_architectes
         self.check_bienvivre = check_bienvivre
+        self.check_zip = check_zip
         self.driver = None
         self.results = []
         self.processed_urls = set()
@@ -160,13 +161,18 @@ class LocalChScraper:
         return last_segment
 
     @retry_on_exception(retries=3, delay=5)
-    def search_by_keyword(self, max_pages=None):
-        """Search Local.ch by keyword and collect all company listings."""
+    def search_by_keyword(self, max_pages=None, start_page=1):
+        """Search Local.ch by keyword and collect all company listings.
+
+        Args:
+            max_pages: Maximum number of pages to scrape
+            start_page: Page number to start from (default: 1)
+        """
         search_url = f"https://www.local.ch/fr/s/{self.keyword}"
-        self.logger.info(f"Starting search for keyword: {self.keyword}")
+        self.logger.info(f"Starting search for keyword: {self.keyword} (from page {start_page})")
 
         company_links = []
-        page_number = 1
+        page_number = start_page
 
         while True:
             try:
@@ -325,10 +331,11 @@ class LocalChScraper:
         Visit company website using Selenium, find legal page, and extract:
         1. Copyright year (e.g., "© 2023")
         2. Local Search mention (e.g., "Realizzato da localsearch.ch")
-        Returns: (copyright_year, has_local_search)
+        3. Zip.ch mention (e.g., "zip.ch" or "myzip.ch")
+        Returns: (copyright_year, has_local_search, has_zip)
         """
         if not website_url or website_url == '':
-            return '', False
+            return '', False, False
 
         # Add https:// if missing
         if not website_url.startswith('http://') and not website_url.startswith('https://'):
@@ -337,6 +344,7 @@ class LocalChScraper:
 
         copyright_year = ''
         has_local_search = False
+        has_zip = False
 
         try:
             self.logger.info(f"    Visiting website with browser: {website_url}")
@@ -349,6 +357,21 @@ class LocalChScraper:
             soup = BeautifulSoup(page_source, 'html.parser')
 
             self.logger.info(f"    Page loaded successfully")
+
+            # CHECK ENTIRE MAIN PAGE FOR ZIP.CH AND LOCAL SEARCH BEFORE NAVIGATING AWAY
+            page_source_lower = page_source.lower()
+
+            # Check for Zip.ch (IMPORTANT: Check both "zip.ch" and "myzip.ch")
+            self.logger.info(f"    Checking main page for Zip.ch...")
+            if 'zip.ch' in page_source_lower or 'myzip.ch' in page_source_lower:
+                has_zip = True
+                self.logger.info(f"    ✓ Zip.ch found in main page!")
+
+            # Check for Local Search
+            self.logger.info(f"    Checking main page for Local Search...")
+            if 'localsearch.ch' in page_source_lower or 'local.ch' in page_source_lower:
+                has_local_search = True
+                self.logger.info(f"    ✓ Local Search found in main page!")
 
             # Look for legal/note-legali links in footer
             legal_link_patterns = [
@@ -385,40 +408,47 @@ class LocalChScraper:
                     legal_text_lower = legal_text.lower()
                     legal_html_lower = legal_page_source.lower()
 
-                    # Check for Local Search mentions
-                    self.logger.info(f"    Checking for Local Search indicators in legal page...")
+                    # Check for Local Search mentions (if not already found)
+                    if not has_local_search:
+                        self.logger.info(f"    Checking for Local Search indicators in legal page...")
 
-                    # Look for specific patterns in HTML
-                    if 'localsearch.ch' in legal_html_lower:
-                        self.logger.info(f"      Found 'localsearch.ch' in HTML")
+                        # Look for specific patterns in HTML
+                        if 'localsearch.ch' in legal_html_lower:
+                            self.logger.info(f"      Found 'localsearch.ch' in HTML")
 
-                       # Check for creation phrases
-                        if any(phrase in legal_text_lower for phrase in [
-                                'realizzato da',   # Italian: "Created by"
-                                'realisiert durch', # German: "Created by"
-                                'réalisé par',     # French: "Created by"
-                                'erstellt von',    # German: "Created by"
-                            ]):
-                                has_local_search = True
-                                self.logger.info(f"    ✓ Local Search found with creation phrase")
+                            # Check for creation phrases
+                            if any(phrase in legal_text_lower for phrase in [
+                                    'realizzato da',   # Italian: "Created by"
+                                    'realisiert durch', # German: "Created by"
+                                    'réalisé par',     # French: "Created by"
+                                    'erstellt von',    # German: "Created by"
+                                ]):
+                                    has_local_search = True
+                                    self.logger.info(f"    ✓ Local Search found with creation phrase")
 
                             # Also check for "Eintrag auf local.ch" pattern
-                        elif 'eintrag auf' in legal_text_lower and 'local.ch' in legal_text_lower:
-                                has_local_search = True
-                                self.logger.info(f"    ✓ Local Search found: 'Eintrag auf local.ch'")
+                            elif 'eintrag auf' in legal_text_lower and 'local.ch' in legal_text_lower:
+                                    has_local_search = True
+                                    self.logger.info(f"    ✓ Local Search found: 'Eintrag auf local.ch'")
 
                             # Check for "iscrizione su local.ch" (Italian)
-                        elif 'iscrizione su' in legal_text_lower and 'local.ch' in legal_text_lower:
-                                has_local_search = True
-                                self.logger.info(f"    ✓ Local Search found: 'iscrizione su local.ch'")
+                            elif 'iscrizione su' in legal_text_lower and 'local.ch' in legal_text_lower:
+                                    has_local_search = True
+                                    self.logger.info(f"    ✓ Local Search found: 'iscrizione su local.ch'")
 
-                        else:
-                                # Just finding localsearch.ch link is a strong indicator
-                                has_local_search = True
-                                self.logger.info(f"    ✓ Local Search found: localsearch.ch present")
+                            else:
+                                    # Just finding localsearch.ch link is a strong indicator
+                                    has_local_search = True
+                                    self.logger.info(f"    ✓ Local Search found: localsearch.ch present")
 
                         if not has_local_search:
                             self.logger.info(f"    ✗ No Local Search indicators found")
+
+                    # Check for Zip.ch in legal page (if not already found)
+                    if not has_zip:
+                        if 'zip.ch' in legal_html_lower or 'myzip.ch' in legal_html_lower:
+                            has_zip = True
+                            self.logger.info(f"    ✓ Zip.ch found in legal page")
 
                     # Extract copyright year from legal page
                     self.logger.info(f"    Searching for copyright year...")
@@ -463,17 +493,17 @@ class LocalChScraper:
                             has_local_search = True
                             self.logger.info(f"    ✓ Local Search found in footer!")
 
-            return copyright_year, has_local_search
+            return copyright_year, has_local_search, has_zip
 
         except requests.exceptions.Timeout:
             self.logger.warning(f"    Timeout accessing website {website_url}")
-            return '', False
+            return '', False, False
         except requests.exceptions.RequestException as e:
             self.logger.warning(f"    Request error for {website_url}: {str(e)}")
-            return '', False
+            return '', False, False
         except Exception as e:
             self.logger.warning(f"    Unexpected error checking website {website_url}: {str(e)}")
-            return '', False
+            return '', False, False
 
     def scrape_moneyhouse_persons(self, company_title):
         """Scrape person/management data from Moneyhouse.ch
@@ -1193,16 +1223,18 @@ class LocalChScraper:
         # Restore implicit wait before any further navigation
         self.driver.implicitly_wait(1)
 
-        # If website exists and check_websites is enabled, check for Local Search and copyright year
-        if self.check_websites and detail_data['website']:
+        # If website exists and (check_websites OR check_zip) is enabled
+        if (self.check_websites or self.check_zip) and detail_data['website']:
             self.logger.info(f"  Analyzing website: {detail_data['website']}")
-            copyright_year, has_local_search = self.check_website_for_localsearch_and_copyright(detail_data['website'])
+            copyright_year, has_local_search, has_zip = self.check_website_for_localsearch_and_copyright(detail_data['website'])
             detail_data['copyright_year'] = copyright_year
             detail_data['has_local_search'] = has_local_search
+            detail_data['zip'] = 'Yes' if has_zip else 'No'
         else:
             # Set default values when website checking is disabled
             detail_data['copyright_year'] = 'N/A'
             detail_data['has_local_search'] = 'N/A'
+            detail_data['zip'] = 'N/A'
 
         # Check Moneyhouse.ch for person/management data
         if self.check_moneyhouse:

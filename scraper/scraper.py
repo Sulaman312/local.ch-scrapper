@@ -96,8 +96,8 @@ class LocalChScraper:
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
 
-        # Randomly select a user agent from the list
-        user_agent = random.choice(USER_AGENTS)
+        # Use a standard Chrome user agent (most compatible)
+        user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
         options.add_argument(f'--user-agent={user_agent}')
         self.logger.info(f"Using User-Agent: {user_agent}")
 
@@ -214,14 +214,22 @@ class LocalChScraper:
                 # Extract all href attributes immediately to avoid stale element issues
                 page_links_before = len(company_links)
                 page_hrefs = []
-                for link_elem in link_elements:
+                for i, link_elem in enumerate(link_elements):
                     try:
                         link = link_elem.get_attribute('href')
                         if link:
                             page_hrefs.append(link)
                             if link not in company_links:
                                 company_links.append(link)
-                    except Exception:
+                        else:
+                            # Debug: log when href is None/empty
+                            if i < 3:  # Only log first 3 to avoid spam
+                                tag_name = link_elem.tag_name
+                                outer_html = link_elem.get_attribute('outerHTML')[:200]
+                                self.logger.warning(f"Link element {i} has no href. Tag: {tag_name}, HTML: {outer_html}")
+                    except Exception as e:
+                        if i < 3:
+                            self.logger.warning(f"Error extracting link {i}: {str(e)}")
                         continue
 
                 new_links = len(company_links) - page_links_before

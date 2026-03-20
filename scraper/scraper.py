@@ -189,26 +189,27 @@ class LocalChScraper:
 
                 self.driver.get(url)
 
-                # Find all company listing cards
-                cards = self.driver.find_elements(By.CSS_SELECTOR, "article[data-testid^='list-element']")
+                # Find all company detail links directly (more stable than iterating through cards)
+                link_elements = self.driver.find_elements(By.CSS_SELECTOR, "article[data-testid^='list-element'] a[href*='/d/']")
 
-                if not cards:
+                if not link_elements:
                     self.logger.info(f"No more results found on page {page_number}")
                     break
 
-                self.logger.info(f"Found {len(cards)} listings on page {page_number}")
+                self.logger.info(f"Found {len(link_elements)} link elements on page {page_number}")
 
-                for card in cards:
+                # Extract all href attributes immediately to avoid stale element issues
+                page_links_before = len(company_links)
+                for link_elem in link_elements:
                     try:
-                        # Extract company link
-                        link_elem = card.find_element(By.CSS_SELECTOR, "a[href*='/d/']")
                         link = link_elem.get_attribute('href')
-
                         if link and link not in company_links:
                             company_links.append(link)
-
-                    except NoSuchElementException:
+                    except Exception:
                         continue
+
+                new_links = len(company_links) - page_links_before
+                self.logger.info(f"Added {new_links} new unique company links from page {page_number}")
 
                 # Check if there's a next page
                 try:

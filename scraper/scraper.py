@@ -204,34 +204,63 @@ class LocalChScraper:
 
                 # Find all company detail links directly (more stable than iterating through cards)
                 # Use more specific selector to get only the main company link (not images/buttons)
-                link_elements = self.driver.find_elements(By.CSS_SELECTOR, "article[data-testid^='list-element'] > a[href*='/d/']")
-
-                if not link_elements:
-                    self.logger.info(f"No more results found on page {page_number}")
-                    break
-
-                self.logger.info(f"Found {len(link_elements)} link elements on page {page_number}")
-
-                # Extract all href attributes immediately to avoid stale element issues
+                # Extract hrefs immediately to avoid stale element references
                 page_links_before = len(company_links)
                 page_hrefs = []
-                for i, link_elem in enumerate(link_elements):
+                retry_count = 0
+                max_retries = 3
+
+                while retry_count < max_retries:
                     try:
-                        link = link_elem.get_attribute('href')
-                        if link:
-                            page_hrefs.append(link)
-                            if link not in company_links:
-                                company_links.append(link)
+                        # Re-find elements on each attempt to handle DOM updates
+                        link_elements = self.driver.find_elements(By.CSS_SELECTOR, "article[data-testid^='list-element'] > a[href*='/d/']")
+
+                        if not link_elements:
+                            self.logger.info(f"No more results found on page {page_number}")
+                            break
+
+                        self.logger.info(f"Found {len(link_elements)} link elements on page {page_number}")
+
+                        # Extract hrefs in one pass without storing element references
+                        temp_hrefs = []
+                        for i in range(len(link_elements)):
+                            try:
+                                # Re-find the specific element each time to avoid stale references
+                                current_elements = self.driver.find_elements(By.CSS_SELECTOR, "article[data-testid^='list-element'] > a[href*='/d/']")
+                                if i < len(current_elements):
+                                    link = current_elements[i].get_attribute('href')
+                                    if link:
+                                        temp_hrefs.append(link)
+                            except Exception as e:
+                                if i < 3:
+                                    self.logger.warning(f"Error extracting link {i}: {str(e)}")
+                                continue
+
+                        # If we successfully extracted some links, use them
+                        if temp_hrefs:
+                            page_hrefs = temp_hrefs
+                            for link in page_hrefs:
+                                if link not in company_links:
+                                    company_links.append(link)
+                            break
                         else:
-                            # Debug: log when href is None/empty
-                            if i < 3:  # Only log first 3 to avoid spam
-                                tag_name = link_elem.tag_name
-                                outer_html = link_elem.get_attribute('outerHTML')[:200]
-                                self.logger.warning(f"Link element {i} has no href. Tag: {tag_name}, HTML: {outer_html}")
+                            # No links extracted, retry
+                            retry_count += 1
+                            if retry_count < max_retries:
+                                self.logger.warning(f"Failed to extract links, retrying ({retry_count}/{max_retries})...")
+                                import time
+                                time.sleep(1)
+                            continue
+
                     except Exception as e:
-                        if i < 3:
-                            self.logger.warning(f"Error extracting link {i}: {str(e)}")
-                        continue
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            self.logger.warning(f"Error finding elements, retrying ({retry_count}/{max_retries}): {str(e)}")
+                            import time
+                            time.sleep(1)
+                        else:
+                            self.logger.error(f"Failed to extract links after {max_retries} retries: {str(e)}")
+                            break
 
                 new_links = len(company_links) - page_links_before
                 unique_on_page = len(set(page_hrefs))

@@ -87,6 +87,7 @@ class LocalChScraper:
         options = webdriver.ChromeOptions()
 
         options.add_argument('--headless=new')
+        options.add_argument('--window-size=1920,1080')  # Set viewport size for headless mode
         options.add_argument('--disable-gpu')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')

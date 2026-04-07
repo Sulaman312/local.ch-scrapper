@@ -45,11 +45,11 @@ stop_flags = {}
 # Hardcoded users - in production, use database with hashed passwords
 USERS = {
     'admin': {
-        'password': 'Admin@12345',
+        'password': 'Test12345@!!',
         'role': 'admin'
     },
     'user': {
-        'password': 'User@12345',
+        'password': 'Test12345@!!',
         'role': 'user'
     }
 }
@@ -344,35 +344,53 @@ def api_me():
 @app.route('/api/scrape/check-keyword', methods=['POST'])
 @api_admin_required
 def check_keyword():
-    """Check if keyword was scraped in the past week"""
+    """Check if keyword was scraped before"""
     data = request.json
     keyword = data.get('keyword', '').strip()
 
     if not keyword:
         return jsonify({'exists': False})
 
-    # Check for jobs with same keyword in the past 7 days
-    from datetime import timedelta
-    one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-
-    existing_job = jobs_collection.find_one(
+    # Find ALL completed/stopped/failed jobs with this keyword to determine cumulative progress
+    # We need to find the highest page number scraped across all attempts
+    all_jobs = list(jobs_collection.find(
         {
             'keyword': keyword,
-            'created_at': {'$gte': one_week_ago},
-            'status': {'$in': ['completed', 'stopped']}
+            'status': {'$in': ['completed', 'stopped', 'failed']}
         },
         sort=[('created_at', -1)]
-    )
+    ))
 
-    if existing_job:
-        return jsonify({
-            'exists': True,
-            'last_max_pages': existing_job.get('max_pages', 0),
-            'job_id': str(existing_job['_id']),
-            'created_at': existing_job['created_at'].isoformat() if hasattr(existing_job['created_at'], 'isoformat') else existing_job['created_at']
-        })
+    if not all_jobs:
+        return jsonify({'exists': False})
 
-    return jsonify({'exists': False})
+    # Calculate the highest page scraped across all jobs
+    import math
+    highest_page = 0
+    most_recent_job = all_jobs[0]
+
+    for job in all_jobs:
+        start_page = job.get('start_page', 1) or 1
+        max_pages = job.get('max_pages')
+        total_companies = job.get('total_companies', 0)
+
+        # Calculate the last page this job reached
+        if max_pages is not None and max_pages > 0:
+            # Job had explicit max_pages set
+            last_page = max_pages
+        else:
+            # Job had max_pages=None (scrape all), calculate from companies
+            pages_scraped = math.ceil(total_companies / 20) if total_companies > 0 else 0
+            last_page = (start_page - 1) + pages_scraped if pages_scraped > 0 else 0
+
+        highest_page = max(highest_page, last_page)
+
+    return jsonify({
+        'exists': True,
+        'last_max_pages': highest_page,
+        'job_id': str(most_recent_job['_id']),
+        'created_at': most_recent_job['created_at'].isoformat() if hasattr(most_recent_job['created_at'], 'isoformat') else str(most_recent_job['created_at'])
+    })
 
 
 @app.route('/api/scrape/start', methods=['POST'])
@@ -675,6 +693,18 @@ def stop_job(job_id):
 
         # Get current progress
         companies_scraped = companies_collection.count_documents({'job_id': ObjectId(job_id)})
+
+        # Immediately update job status to 'stopped' in database
+        jobs_collection.update_one(
+            {'_id': ObjectId(job_id)},
+            {
+                '$set': {
+                    'status': 'stopped',
+                    'completed_at': datetime.now(timezone.utc),
+                    'companies_scraped': companies_scraped
+                }
+            }
+        )
 
         return jsonify({
             'success': True,

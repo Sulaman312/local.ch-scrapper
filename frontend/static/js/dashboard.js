@@ -180,10 +180,20 @@ async function showContinuePrompt(keyword, lastMaxPages, newMaxPages) {
         `;
 
         const titleText = lang === 'fr' ? 'Mot-clé déjà extrait' : 'Keyword Already Scraped';
+
+        // Handle the case where lastMaxPages is 0 or null (meaning "all pages" were scraped)
+        const pagesText = lastMaxPages > 0 ? `${lastMaxPages} pages` : (lang === 'fr' ? 'toutes les pages' : 'all pages');
+        const continueInfo = lastMaxPages > 0 && newMaxPages
+            ? (lang === 'fr' ? `<br><br>Si vous continuez, il extraira les pages <strong>${lastMaxPages + 1}-${endPage}</strong>.` : `<br><br>If you continue, it will scrape pages <strong>${lastMaxPages + 1}-${endPage}</strong>.`)
+            : '';
+
         const descText = lang === 'fr'
-            ? `Vous avez déjà extrait "<strong>${keyword}</strong>" récemment (${lastMaxPages} pages).${newMaxPages ? `<br><br>Si vous continuez, il extraira les pages <strong>${lastMaxPages + 1}-${endPage}</strong>.` : ''}`
-            : `You've already scraped "<strong>${keyword}</strong>" recently (${lastMaxPages} pages).${newMaxPages ? `<br><br>If you continue, it will scrape pages <strong>${lastMaxPages + 1}-${endPage}</strong>.` : ''}`;
-        const continueText = lang === 'fr' ? `Continuer depuis la page ${lastMaxPages + 1}` : `Continue from Page ${lastMaxPages + 1}`;
+            ? `Vous avez déjà extrait "<strong>${keyword}</strong>" précédemment (${pagesText}).${continueInfo}`
+            : `You've already scraped "<strong>${keyword}</strong>" before (${pagesText}).${continueInfo}`;
+
+        const continueText = lastMaxPages > 0
+            ? (lang === 'fr' ? `Continuer depuis la page ${lastMaxPages + 1}` : `Continue from Page ${lastMaxPages + 1}`)
+            : (lang === 'fr' ? 'Continuer' : 'Continue');
         const freshText = lang === 'fr' ? 'Recommencer depuis la page 1' : 'Start Fresh from Page 1';
         const cancelText = lang === 'fr' ? 'Annuler' : 'Cancel';
 
@@ -382,19 +392,24 @@ async function handleStartScrape(e) {
         const checkData = await checkResponse.json();
 
         // If keyword exists, prompt user
-        if (checkData.exists && checkData.last_max_pages) {
-            const continueChoice = await showContinuePrompt(keyword, checkData.last_max_pages, maxPages);
+        if (checkData.exists) {
+            const lastMaxPages = checkData.last_max_pages || 0;
+            const continueChoice = await showContinuePrompt(keyword, lastMaxPages, maxPages);
 
             if (continueChoice === 'cancel') {
                 startBtn.disabled = false;
                 startBtn.innerHTML = `<i class="fas fa-play"></i> ${window.i18n.t('scrapeForm.startScraping')}`;
                 return;
             } else if (continueChoice === 'continue') {
-                startPage = checkData.last_max_pages + 1;
-                // CRITICAL: Adjust max_pages to be the total end page
-                if (maxPages) {
-                    adjustedMaxPages = checkData.last_max_pages + maxPages;
+                // Only adjust start page if we have a valid last_max_pages
+                if (lastMaxPages > 0) {
+                    startPage = lastMaxPages + 1;
+                    // CRITICAL: Adjust max_pages to be the total end page
+                    if (maxPages) {
+                        adjustedMaxPages = lastMaxPages + maxPages;
+                    }
                 }
+                // If lastMaxPages is 0 (all pages were scraped), continue from page 1
             }
             // If 'fresh', startPage remains 1 and maxPages unchanged
         }

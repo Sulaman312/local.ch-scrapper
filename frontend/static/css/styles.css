@@ -268,6 +268,17 @@ body {
     background-color: #059669;
 }
 
+.btn-disabled {
+    opacity: 0.65;
+    filter: grayscale(0.15);
+}
+
+.btn-disabled:hover {
+    opacity: 0.65;
+    transform: none;
+    box-shadow: none;
+}
+
 .btn-danger {
     background-color: var(--accent-red);
     color: white;
@@ -740,4 +751,113 @@ a.btn:active {
     cursor: pointer;
     flex: 1;
     user-select: none;
+}
+
+.pipedrive-import-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.pipedrive-import-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    align-items: flex-start;
+}
+
+.pipedrive-import-subtitle {
+    color: var(--text-gray);
+    font-size: 0.9375rem;
+}
+
+.pipedrive-progress-block {
+    border: 1px solid var(--border-gray);
+    border-radius: 0.75rem;
+    padding: 1rem;
+    background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.pipedrive-progress-label-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-dark);
+}
+
+.pipedrive-progress-bar {
+    margin-bottom: 0;
+}
+
+.pipedrive-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.75rem;
+}
+
+.pipedrive-stat-card {
+    background: var(--bg-light);
+    border: 1px solid var(--border-gray);
+    border-radius: 0.75rem;
+    padding: 0.875rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.pipedrive-stat-label {
+    color: var(--text-gray);
+    font-size: 0.8125rem;
+}
+
+.pipedrive-state-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 100px;
+    padding: 0.5rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.8125rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.pipedrive-state-idle {
+    background: var(--bg-gray);
+    color: var(--text-gray);
+}
+
+.pipedrive-state-queued {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.pipedrive-state-running {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.pipedrive-state-completed {
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.pipedrive-state-failed {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.pipedrive-error-box {
+    background: #fff1f2;
+    color: #9f1239;
+    border: 1px solid #fecdd3;
+    border-radius: 0.75rem;
+    padding: 1rem;
+    white-space: pre-wrap;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.875rem;
 }

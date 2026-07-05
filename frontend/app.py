@@ -17,6 +17,8 @@ from io import BytesIO
 from dotenv import load_dotenv
 import json
 from functools import wraps
+from requests.auth import HTTPBasicAuth
+import requests
 
 # Load environment variables from .env file
 load_dotenv()
@@ -41,6 +43,11 @@ companies_collection = db['companies']
 # Active scraping threads and stop flags
 active_threads = {}
 stop_flags = {}
+
+PIPEDRIVE_IMPORT_ENABLED = os.getenv('ENABLE_PIPEDRIVE_IMPORT', 'false').strip().lower() == 'true'
+PIPEDRIVE_APP_BASE_URL = os.getenv('PIPEDRIVE_APP_BASE_URL', '').rstrip('/')
+PIPEDRIVE_APP_USERNAME = os.getenv('PIPEDRIVE_APP_USERNAME') or os.getenv('APP_USERNAME')
+PIPEDRIVE_APP_PASSWORD = os.getenv('PIPEDRIVE_APP_PASSWORD') or os.getenv('APP_PASSWORD')
 
 # Hardcoded users - in production, use database with hashed passwords
 USERS = {
@@ -289,7 +296,71 @@ def index():
 @login_required
 def results():
     """Results browser page - All authenticated users"""
-    return render_template('results.html')
+    return render_template(
+        'results.html',
+        pipedrive_import_enabled=PIPEDRIVE_IMPORT_ENABLED
+    )
+
+
+def build_export_dataframe(job_id=None, keyword=None, score_min=None, score_max=None,
+                           has_local_search=None, has_social_media=None,
+                           min_reviews=None, city=None, language=None):
+    """Build an export dataframe from the current companies query."""
+    query = {}
+    if keyword:
+        query['keyword'] = keyword
+    if job_id:
+        query['job_id'] = ObjectId(job_id)
+    if score_min is not None:
+        query['credibility_score'] = {'$gte': score_min}
+    if score_max is not None:
+        query.setdefault('credibility_score', {})['$lte'] = score_max
+    if has_local_search is not None:
+        query['has_local_search'] = has_local_search == 'true'
+    if has_social_media is not None:
+        query['has_social_media'] = has_social_media == 'true'
+    if min_reviews is not None:
+        query['review_count'] = {'$gte': min_reviews}
+    if city:
+        query['city'] = {'$regex': city, '$options': 'i'}
+    if language:
+        languages_list = [lang.strip() for lang in language.split(',')]
+        query['languages'] = {'$in': languages_list}
+
+    companies = list(companies_collection.find(query).sort('credibility_score', -1))
+    for company in companies:
+        company.pop('_id', None)
+        company.pop('job_id', None)
+        company.pop('created_at', None)
+
+    return pd.DataFrame(companies)
+
+
+def build_export_workbook(df):
+    """Serialize companies dataframe to an XLSX workbook."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Companies')
+    output.seek(0)
+    return output
+
+
+def get_pipedrive_auth():
+    if not PIPEDRIVE_APP_BASE_URL:
+        return None, ('PIPEDRIVE_APP_BASE_URL is not configured', 500)
+    if not PIPEDRIVE_APP_USERNAME or not PIPEDRIVE_APP_PASSWORD:
+        return None, ('PIPEDRIVE import credentials are not configured', 500)
+    return HTTPBasicAuth(PIPEDRIVE_APP_USERNAME, PIPEDRIVE_APP_PASSWORD), None
+
+
+def pipedrive_feature_guard():
+    if not PIPEDRIVE_IMPORT_ENABLED:
+        return jsonify({'error': 'Pipedrive import is disabled'}), 404
+    auth, error = get_pipedrive_auth()
+    if error:
+        message, status = error
+        return jsonify({'error': message}), status
+    return auth
 
 
 # ============= API Endpoints =============
@@ -622,30 +693,17 @@ def export_companies():
     city = request.args.get('city')
     language = request.args.get('language')
 
-    # Build query
-    query = {}
-    if keyword:
-        query['keyword'] = keyword
-    if job_id:
-        query['job_id'] = ObjectId(job_id)
-    if score_min is not None:
-        query['credibility_score'] = {'$gte': score_min}
-    if score_max is not None:
-        query.setdefault('credibility_score', {})['$lte'] = score_max
-    if has_local_search is not None:
-        query['has_local_search'] = has_local_search == 'true'
-    if has_social_media is not None:
-        query['has_social_media'] = has_social_media == 'true'
-    if min_reviews is not None:
-        query['review_count'] = {'$gte': min_reviews}
-    if city:
-        query['city'] = {'$regex': city, '$options': 'i'}
-    if language:
-        languages_list = [lang.strip() for lang in language.split(',')]
-        query['languages'] = {'$in': languages_list}
-
-    # Get all matching companies (no pagination - export all filtered results)
-    companies = list(companies_collection.find(query).sort('credibility_score', -1))
+    df = build_export_dataframe(
+        job_id=job_id,
+        keyword=keyword,
+        score_min=score_min,
+        score_max=score_max,
+        has_local_search=has_local_search,
+        has_social_media=has_social_media,
+        min_reviews=min_reviews,
+        city=city,
+        language=language
+    )
 
     # Get job keyword for filename if job_id provided
     export_name = keyword or 'all'
@@ -654,18 +712,7 @@ def export_companies():
         if job:
             export_name = job.get('keyword', 'all')
 
-    # Remove MongoDB _id and job_id for export
-    for company in companies:
-        company.pop('_id', None)
-        company.pop('job_id', None)
-        company.pop('created_at', None)
-
-    # Create Excel file
-    df = pd.DataFrame(companies)
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Companies')
-    output.seek(0)
+    output = build_export_workbook(df)
 
     return send_file(
         output,
@@ -673,6 +720,102 @@ def export_companies():
         as_attachment=True,
         download_name=f'localch_export_{export_name}_{datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")}.xlsx'
     )
+
+
+@app.route('/api/pipedrive-import/config', methods=['GET'])
+@api_login_required
+def pipedrive_import_config():
+    return jsonify({'enabled': PIPEDRIVE_IMPORT_ENABLED})
+
+
+@app.route('/api/pipedrive-import/jobs/<job_id>/start', methods=['POST'])
+@api_login_required
+def start_pipedrive_import(job_id):
+    auth_or_response = pipedrive_feature_guard()
+    if not isinstance(auth_or_response, HTTPBasicAuth):
+        return auth_or_response
+
+    job = jobs_collection.find_one({'_id': ObjectId(job_id)})
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+
+    df = build_export_dataframe(job_id=job_id)
+    if df.empty:
+        return jsonify({'error': 'No companies available to import'}), 400
+
+    workbook = build_export_workbook(df)
+    filename = f"localch_export_{job.get('keyword', 'job')}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+    try:
+        response = requests.post(
+            f'{PIPEDRIVE_APP_BASE_URL}/api/import-direct',
+            auth=auth_or_response,
+            files={
+                'source_file': (
+                    filename,
+                    workbook.getvalue(),
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
+            },
+            timeout=120
+        )
+    except requests.RequestException as exc:
+        return jsonify({'error': f'Failed to contact Pipedrive import service: {exc}'}), 502
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {'error': response.text or 'Unexpected response from Pipedrive import service'}
+
+    return jsonify(payload), response.status_code
+
+
+@app.route('/api/pipedrive-import/jobs/<external_job_id>/status', methods=['GET'])
+@api_login_required
+def pipedrive_import_status(external_job_id):
+    auth_or_response = pipedrive_feature_guard()
+    if not isinstance(auth_or_response, HTTPBasicAuth):
+        return auth_or_response
+
+    try:
+        response = requests.get(
+            f'{PIPEDRIVE_APP_BASE_URL}/api/jobs/{external_job_id}/status',
+            auth=auth_or_response,
+            timeout=30
+        )
+    except requests.RequestException as exc:
+        return jsonify({'error': f'Failed to fetch import status: {exc}'}), 502
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {'error': response.text or 'Unexpected response from Pipedrive import service'}
+
+    return jsonify(payload), response.status_code
+
+
+@app.route('/api/pipedrive-import/jobs/<external_job_id>/result', methods=['GET'])
+@api_login_required
+def pipedrive_import_result(external_job_id):
+    auth_or_response = pipedrive_feature_guard()
+    if not isinstance(auth_or_response, HTTPBasicAuth):
+        return auth_or_response
+
+    try:
+        response = requests.get(
+            f'{PIPEDRIVE_APP_BASE_URL}/api/jobs/{external_job_id}/result',
+            auth=auth_or_response,
+            timeout=30
+        )
+    except requests.RequestException as exc:
+        return jsonify({'error': f'Failed to fetch import result: {exc}'}), 502
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {'error': response.text or 'Unexpected response from Pipedrive import service'}
+
+    return jsonify(payload), response.status_code
 
 
 @app.route('/api/scrape/jobs/<job_id>/stop', methods=['POST'])

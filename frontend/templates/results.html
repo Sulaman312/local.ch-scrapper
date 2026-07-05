@@ -91,10 +91,53 @@
                             <button class="btn btn-secondary" id="stopJobBtn" onclick="stopCurrentJob()" style="display: none;">
                                 <i class="fas fa-stop"></i> <span data-i18n="results.stopJob">Stop Job</span>
                             </button>
+                            <button class="btn btn-primary" id="importPipedriveBtn" style="display: none;">
+                                <i class="fas fa-cloud-upload-alt"></i> <span data-i18n="results.importToPipedrive">Import to Pipedrive</span>
+                            </button>
                             <button class="btn btn-success" id="exportJobBtn">
                                 <i class="fas fa-download"></i> <span data-i18n="results.exportToExcel">Export to Excel</span>
                             </button>
                         </div>
+                    </div>
+                </div>
+
+                <div class="card mb-2" id="pipedriveImportPanel" style="display: none;">
+                    <div class="pipedrive-import-panel">
+                        <div class="pipedrive-import-header">
+                            <div>
+                                <h3 class="card-header" style="margin-bottom: 0.5rem;" data-i18n="results.pipedriveImportStatus">Pipedrive Import Status</h3>
+                                <p class="pipedrive-import-subtitle" id="pipedriveImportMessage">Waiting to start.</p>
+                            </div>
+                            <span class="pipedrive-state-badge pipedrive-state-idle" id="pipedriveImportState">Idle</span>
+                        </div>
+                        <div class="pipedrive-progress-block">
+                            <div class="pipedrive-progress-label-row">
+                                <span id="pipedrivePercent">0%</span>
+                                <span id="pipedriveProcessed">0 / 0</span>
+                            </div>
+                            <div class="progress-bar pipedrive-progress-bar">
+                                <div class="progress-fill" id="pipedriveProgressFill" style="width: 0%;"></div>
+                            </div>
+                        </div>
+                        <div class="pipedrive-stats-grid">
+                            <div class="pipedrive-stat-card">
+                                <span class="pipedrive-stat-label" data-i18n="results.failedRows">Failed Rows</span>
+                                <strong id="pipedriveFailedRows">0</strong>
+                            </div>
+                            <div class="pipedrive-stat-card">
+                                <span class="pipedrive-stat-label" data-i18n="results.organizations">Organizations</span>
+                                <strong id="pipedriveOrganizations">0 / 0</strong>
+                            </div>
+                            <div class="pipedrive-stat-card">
+                                <span class="pipedrive-stat-label" data-i18n="results.persons">Persons</span>
+                                <strong id="pipedrivePersons">0 / 0</strong>
+                            </div>
+                            <div class="pipedrive-stat-card">
+                                <span class="pipedrive-stat-label" data-i18n="results.deals">Deals</span>
+                                <strong id="pipedriveDeals">0 / 0</strong>
+                            </div>
+                        </div>
+                        <pre class="pipedrive-error-box" id="pipedriveErrorBox" style="display: none;"></pre>
                     </div>
                 </div>
 
@@ -241,6 +284,11 @@
 
     <script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
     <script src="{{ url_for('static', filename='js/modal.js') }}"></script>
+    <script>
+        window.APP_CONFIG = {
+            pipedriveImportEnabled: {{ 'true' if pipedrive_import_enabled else 'false' }}
+        };
+    </script>
     <script src="{{ url_for('static', filename='js/results.js') }}"></script>
 </body>
 </html>

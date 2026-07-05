@@ -1,5 +1,7 @@
 // API Base URL
 const API_BASE = '';
+const APP_CONFIG = window.APP_CONFIG || {};
+const PIPEDRIVE_POLL_MS = 2500;
 
 // State
 let currentJobId = null;
@@ -7,6 +9,9 @@ let currentPage = 1;
 let totalPages = 1;
 let totalResults = 0;
 let currentFilters = {};
+let currentJobStatus = null;
+let currentPipedriveImportJobId = null;
+let pipedrivePollTimeout = null;
 
 // Load page
 document.addEventListener('DOMContentLoaded', async () => {
@@ -47,6 +52,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('exportJobBtn').addEventListener('click', exportCurrentJob);
     document.getElementById('applyFiltersBtn').addEventListener('click', applyFilters);
     document.getElementById('resetFiltersBtn').addEventListener('click', resetFilters);
+    document.getElementById('importPipedriveBtn')?.addEventListener('click', handleImportToPipedriveClick);
 });
 
 // Logout function
@@ -129,10 +135,12 @@ async function viewJobResults(jobId) {
     try {
         const jobResponse = await fetch(`${API_BASE}/api/scrape/jobs/${jobId}`);
         const job = await jobResponse.json();
+        currentJobStatus = job.status;
         document.getElementById('currentJobKeyword').textContent = job.keyword;
 
         // Show/hide stop button based on job status
         const stopJobBtn = document.getElementById('stopJobBtn');
+        const importBtn = document.getElementById('importPipedriveBtn');
         if (job.status === 'running') {
             stopJobBtn.style.display = 'inline-block';
             stopJobBtn.setAttribute('data-job-id', job._id);
@@ -140,6 +148,12 @@ async function viewJobResults(jobId) {
         } else {
             stopJobBtn.style.display = 'none';
         }
+        if (importBtn) {
+            importBtn.style.display = 'inline-flex';
+            importBtn.disabled = false;
+            importBtn.classList.toggle('btn-disabled', !APP_CONFIG.pipedriveImportEnabled);
+        }
+        resetPipedriveImportPanel();
 
         // Populate language filter options
         await populateLanguageFilter();
@@ -159,6 +173,10 @@ async function viewJobResults(jobId) {
 // Back to jobs list
 function backToJobs() {
     currentJobId = null;
+    currentJobStatus = null;
+    currentPipedriveImportJobId = null;
+    clearPipedriveImportPolling();
+    resetPipedriveImportPanel();
     document.getElementById('jobsView').style.display = 'block';
     document.getElementById('companiesView').style.display = 'none';
     window.history.pushState({}, '', '/results');
@@ -537,6 +555,278 @@ function exportCurrentJob() {
 
     const queryString = new URLSearchParams(params).toString();
     window.location.href = `${API_BASE}/api/export?${queryString}`;
+}
+
+async function handleImportToPipedriveClick() {
+    if (!currentJobId) {
+        return;
+    }
+
+    if (!APP_CONFIG.pipedriveImportEnabled) {
+        showAlert(window.i18n.t('results.pipedriveUnavailable'), 'info');
+        return;
+    }
+
+    if (currentJobStatus === 'running' || currentJobStatus === 'pending') {
+        showAlert(window.i18n.t('results.pipedriveWaitForCompletion'), 'warning');
+        return;
+    }
+
+    await startPipedriveImport();
+}
+
+async function startPipedriveImport() {
+    const importBtn = document.getElementById('importPipedriveBtn');
+    clearPipedriveImportPolling();
+    currentPipedriveImportJobId = null;
+    setImportButtonLoading(true);
+    showPipedriveImportPanel();
+    updatePipedriveImportPanel({
+        state: 'queued',
+        percent: 0,
+        processed: 0,
+        total: 0,
+        failed_rows: 0,
+        message: window.i18n.t('results.pipedriveStarting')
+    });
+
+    try {
+        const response = await fetch(`${API_BASE}/api/pipedrive-import/jobs/${currentJobId}/start`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error || window.i18n.t('results.pipedriveStartFailed'));
+        }
+
+        currentPipedriveImportJobId = data.job_id;
+        updatePipedriveImportPanel({
+            state: 'queued',
+            percent: 0,
+            processed: 0,
+            total: 0,
+            failed_rows: 0,
+            message: window.i18n.t('results.pipedriveQueued')
+        });
+
+        importBtn?.classList.remove('btn-disabled');
+        pollPipedriveImportStatus();
+    } catch (error) {
+        updatePipedriveImportPanel({
+            state: 'failed',
+            percent: 0,
+            processed: 0,
+            total: 0,
+            failed_rows: 0,
+            message: window.i18n.t('results.pipedriveStartFailed'),
+            error: error.message
+        });
+        showAlert(error.message, 'error');
+    } finally {
+        setImportButtonLoading(false);
+    }
+}
+
+function clearPipedriveImportPolling() {
+    if (pipedrivePollTimeout) {
+        clearTimeout(pipedrivePollTimeout);
+        pipedrivePollTimeout = null;
+    }
+}
+
+function schedulePipedriveImportPoll() {
+    clearPipedriveImportPolling();
+    pipedrivePollTimeout = setTimeout(pollPipedriveImportStatus, PIPEDRIVE_POLL_MS);
+}
+
+async function pollPipedriveImportStatus() {
+    if (!currentPipedriveImportJobId) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE}/api/pipedrive-import/jobs/${currentPipedriveImportJobId}/status`);
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error || window.i18n.t('results.pipedriveStatusFailed'));
+        }
+
+        updatePipedriveImportPanel({
+            ...data,
+            message: getPipedriveStatusMessage(data)
+        });
+
+        if (data.state === 'completed') {
+            await fetchPipedriveImportResult();
+            return;
+        }
+
+        if (data.state === 'failed') {
+            const errorMessage = data.error || window.i18n.t('results.pipedriveFailed');
+            updatePipedriveImportPanel({
+                ...data,
+                message: errorMessage,
+                error: errorMessage
+            });
+            return;
+        }
+
+        schedulePipedriveImportPoll();
+    } catch (error) {
+        updatePipedriveImportPanel({
+            state: 'failed',
+            message: window.i18n.t('results.pipedriveStatusFailed'),
+            error: error.message
+        });
+    }
+}
+
+async function fetchPipedriveImportResult() {
+    try {
+        const response = await fetch(`${API_BASE}/api/pipedrive-import/jobs/${currentPipedriveImportJobId}/result`);
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error || window.i18n.t('results.pipedriveResultFailed'));
+        }
+
+        if (data.state === 'failed') {
+            updatePipedriveImportPanel({
+                state: 'failed',
+                message: data.error || window.i18n.t('results.pipedriveFailed'),
+                error: data.error || window.i18n.t('results.pipedriveFailed')
+            });
+            return;
+        }
+
+        updatePipedriveImportPanel({
+            state: 'completed',
+            percent: 100,
+            processed: data.result?.rows || 0,
+            total: data.result?.rows || 0,
+            failed_rows: data.result?.failed_rows || 0,
+            organizations_created: data.result?.organizations_created || 0,
+            organizations_updated: data.result?.organizations_updated || 0,
+            persons_created: data.result?.persons_created || 0,
+            persons_updated: data.result?.persons_updated || 0,
+            deals_created: data.result?.deals_created || 0,
+            deals_skipped: data.result?.deals_skipped || 0,
+            message: data.result?.message || window.i18n.t('results.pipedriveCompleted')
+        });
+        showAlert(data.result?.message || window.i18n.t('results.pipedriveCompleted'), 'success');
+    } catch (error) {
+        updatePipedriveImportPanel({
+            state: 'failed',
+            message: window.i18n.t('results.pipedriveResultFailed'),
+            error: error.message
+        });
+    }
+}
+
+function showPipedriveImportPanel() {
+    const panel = document.getElementById('pipedriveImportPanel');
+    if (panel) {
+        panel.style.display = 'block';
+    }
+}
+
+function resetPipedriveImportPanel() {
+    const panel = document.getElementById('pipedriveImportPanel');
+    if (!panel) {
+        return;
+    }
+
+    panel.style.display = 'none';
+    updatePipedriveImportPanel({
+        state: 'idle',
+        percent: 0,
+        processed: 0,
+        total: 0,
+        failed_rows: 0,
+        organizations_created: 0,
+        organizations_updated: 0,
+        persons_created: 0,
+        persons_updated: 0,
+        deals_created: 0,
+        deals_skipped: 0,
+        message: window.i18n?.t('results.pipedriveIdle') || 'Waiting to start.'
+    });
+}
+
+function updatePipedriveImportPanel(data) {
+    const state = data.state || 'idle';
+    const percent = Number.isFinite(data.percent) ? data.percent : 0;
+    const processed = data.processed ?? 0;
+    const total = data.total ?? 0;
+    const failedRows = data.failed_rows ?? 0;
+    const organizationsCreated = data.organizations_created ?? 0;
+    const organizationsUpdated = data.organizations_updated ?? 0;
+    const personsCreated = data.persons_created ?? 0;
+    const personsUpdated = data.persons_updated ?? 0;
+    const dealsCreated = data.deals_created ?? 0;
+    const dealsSkipped = data.deals_skipped ?? 0;
+    const message = data.message || window.i18n.t('results.pipedriveIdle');
+
+    document.getElementById('pipedriveImportMessage').textContent = message;
+    document.getElementById('pipedrivePercent').textContent = `${percent}%`;
+    document.getElementById('pipedriveProcessed').textContent = `${processed} / ${total}`;
+    document.getElementById('pipedriveProgressFill').style.width = `${Math.max(0, Math.min(percent, 100))}%`;
+    document.getElementById('pipedriveFailedRows').textContent = failedRows;
+    document.getElementById('pipedriveOrganizations').textContent = `${organizationsCreated} / ${organizationsUpdated}`;
+    document.getElementById('pipedrivePersons').textContent = `${personsCreated} / ${personsUpdated}`;
+    document.getElementById('pipedriveDeals').textContent = `${dealsCreated} / ${dealsSkipped}`;
+
+    const stateBadge = document.getElementById('pipedriveImportState');
+    stateBadge.textContent = formatStateLabel(state);
+    stateBadge.className = `pipedrive-state-badge pipedrive-state-${state}`;
+
+    const errorBox = document.getElementById('pipedriveErrorBox');
+    if (data.error) {
+        errorBox.textContent = data.error;
+        errorBox.style.display = 'block';
+    } else {
+        errorBox.textContent = '';
+        errorBox.style.display = 'none';
+    }
+}
+
+function setImportButtonLoading(isLoading) {
+    const importBtn = document.getElementById('importPipedriveBtn');
+    if (!importBtn) {
+        return;
+    }
+
+    importBtn.disabled = isLoading;
+    importBtn.innerHTML = isLoading
+        ? `<i class="fas fa-spinner fa-spin"></i> ${window.i18n.t('results.pipedriveImporting')}`
+        : `<i class="fas fa-cloud-upload-alt"></i> <span data-i18n="results.importToPipedrive">${window.i18n.t('results.importToPipedrive')}</span>`;
+}
+
+function getPipedriveStatusMessage(data) {
+    if (data.state === 'completed') {
+        return window.i18n.t('results.pipedriveCompleted');
+    }
+    if (data.state === 'failed') {
+        return data.error || window.i18n.t('results.pipedriveFailed');
+    }
+    if (data.state === 'running') {
+        return `${data.processed || 0} / ${data.total || 0} ${window.i18n.t('results.rowsProcessed')}`;
+    }
+    return window.i18n.t('results.pipedriveQueued');
+}
+
+function formatStateLabel(state) {
+    const labels = {
+        idle: window.i18n.t('results.stateIdle'),
+        queued: window.i18n.t('results.stateQueued'),
+        running: window.i18n.t('results.stateRunning'),
+        completed: window.i18n.t('results.stateCompleted'),
+        failed: window.i18n.t('results.stateFailed')
+    };
+
+    return labels[state] || state;
 }
 
 // Populate language filter with unique languages from companies

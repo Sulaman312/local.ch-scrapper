@@ -15,22 +15,19 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import urllib3
 import random
+from pathlib import Path
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # List of realistic user agents for rotation
 USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64; rv:122.0) Gecko/20100101 Firefox/122.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
 ]
 
 def retry_on_exception(retries=3, delay=5):
@@ -53,18 +50,28 @@ def retry_on_exception(retries=3, delay=5):
         return wrapper
     return decorator
 
+
+class LocalChBlockedError(RuntimeError):
+    """Raised when local.ch serves an anti-bot or 403 block page."""
+
 class LocalChScraper:
-    def __init__(self, keyword="plumber", check_websites=False, check_moneyhouse=False, check_architectes=False, check_bienvivre=False, check_zip=False):
+    def __init__(self, keyword="plumber", check_websites=False, check_moneyhouse=False, check_architectes=False, check_bienvivre=False, check_zip=False,
+                 debug_mode=False, save_debug_artifacts=False, progress_callback=None):
         self.keyword = keyword
         self.check_websites = check_websites
         self.check_moneyhouse = check_moneyhouse
         self.check_architectes = check_architectes
         self.check_bienvivre = check_bienvivre
         self.check_zip = check_zip
+        self.debug_mode = debug_mode
+        self.save_debug_artifacts = save_debug_artifacts
+        self.progress_callback = progress_callback
         self.driver = None
         self.results = []
         self.processed_urls = set()
         self.cookie_consent_handled = False  # Only handle once per session
+        self.debug_dir = None
+        self.user_agent = random.choice(USER_AGENTS)
 
         # Setup logging
         log_filename = f'scraping_log_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
@@ -78,6 +85,40 @@ class LocalChScraper:
         )
         self.logger = logging.getLogger(__name__)
 
+        if self.save_debug_artifacts:
+            safe_keyword = re.sub(r'[^a-zA-Z0-9_-]+', '_', self.keyword).strip('_') or 'keyword'
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.debug_dir = Path.cwd() / "scraper_debug" / f"{timestamp}_{safe_keyword}"
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+            self.logger.info(f"Debug artifacts will be saved to: {self.debug_dir}")
+
+    def report_progress(self, stage, message, **extra):
+        if self.progress_callback:
+            try:
+                self.progress_callback(stage=stage, message=message, **extra)
+            except Exception as e:
+                self.logger.warning(f"Failed to publish progress update: {e}")
+        self.logger.info(f"[{stage}] {message}")
+
+    def capture_debug_artifact(self, label):
+        if not self.save_debug_artifacts or not self.driver or not self.debug_dir:
+            return
+
+        safe_label = re.sub(r'[^a-zA-Z0-9_-]+', '_', label).strip('_') or 'step'
+        timestamp = datetime.now().strftime("%H%M%S")
+        screenshot_path = self.debug_dir / f"{timestamp}_{safe_label}.png"
+        html_path = self.debug_dir / f"{timestamp}_{safe_label}.html"
+
+        try:
+            self.driver.save_screenshot(str(screenshot_path))
+        except Exception as e:
+            self.logger.warning(f"Could not save screenshot for {label}: {e}")
+
+        try:
+            html_path.write_text(self.driver.page_source, encoding='utf-8')
+        except Exception as e:
+            self.logger.warning(f"Could not save page HTML for {label}: {e}")
+
     def setup_driver(self):
         """Initialize the Chrome WebDriver with anti-detection measures."""
         import os
@@ -86,21 +127,30 @@ class LocalChScraper:
 
         options = webdriver.ChromeOptions()
 
-        options.add_argument('--headless=new')
+        headed_mode = os.getenv('SCRAPER_HEADED', 'false').strip().lower() == 'true'
+        if not headed_mode:
+            options.add_argument('--headless=new')
         options.add_argument('--window-size=1920,1080')  # Set viewport size for headless mode
         options.add_argument('--disable-gpu')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-blink-features=AutomationControlled')
+        options.add_argument('--disable-features=IsolateOrigins,site-per-process')
+        options.add_argument('--disable-features=UserAgentClientHint')
         options.add_argument('--ignore-certificate-errors')  # Handle SSL/TLS issues
         options.add_argument('--allow-insecure-localhost')
+        options.add_argument('--lang=fr-CH,fr;q=0.9,en;q=0.8')
+        options.add_argument('--start-maximized')
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
+        options.add_experimental_option("prefs", {
+            "intl.accept_languages": "fr-CH,fr,en",
+            "credentials_enable_service": False,
+            "profile.password_manager_enabled": False,
+        })
 
-        # Use a standard Chrome user agent (most compatible)
-        user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
-        options.add_argument(f'--user-agent={user_agent}')
-        self.logger.info(f"Using User-Agent: {user_agent}")
+        options.add_argument(f'--user-agent={self.user_agent}')
+        self.logger.info(f"Using User-Agent: {self.user_agent}")
 
         # For Railway/production - use system chromium and chromedriver
         service = None
@@ -123,13 +173,92 @@ class LocalChScraper:
             else:
                 self.driver = webdriver.Chrome(options=options)
 
-            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            self._configure_stealth()
             self.driver.implicitly_wait(1)
             self.driver.set_page_load_timeout(15)
             self.logger.info("WebDriver initialized successfully")
+            self.report_progress(
+                'driver_ready',
+                f"Chrome ready in {'headed' if headed_mode else 'headless'} mode",
+                current_url='',
+                page_number=None
+            )
         except Exception as e:
             self.logger.error(f"Failed to initialize WebDriver: {str(e)}")
             raise
+
+    def _configure_stealth(self):
+        self.driver.execute_cdp_cmd("Network.enable", {})
+        self.driver.execute_cdp_cmd("Network.setExtraHTTPHeaders", {
+            "headers": {
+                "Accept-Language": "fr-CH,fr;q=0.9,en;q=0.8",
+                "Upgrade-Insecure-Requests": "1",
+                "DNT": "1",
+            }
+        })
+        self.driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {
+            "timezoneId": "Europe/Zurich"
+        })
+        self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'language', {get: () => 'fr-CH'});
+                Object.defineProperty(navigator, 'languages', {get: () => ['fr-CH', 'fr', 'en']});
+                Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+                Object.defineProperty(navigator, 'vendor', {get: () => 'Google Inc.'});
+                Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+                Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+                Object.defineProperty(screen, 'colorDepth', {get: () => 24});
+                window.chrome = {
+                    runtime: {},
+                    app: {},
+                    loadTimes: function() {},
+                    csi: function() {}
+                };
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications'
+                        ? Promise.resolve({ state: Notification.permission })
+                        : originalQuery(parameters)
+                );
+                const getParameter = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                    if (parameter === 37445) return 'Intel Inc.';
+                    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+                    return getParameter.call(this, parameter);
+                };
+            """
+        })
+
+    def _is_blocked_response(self):
+        title = (self.driver.title or '').lower()
+        body_text = ''
+        try:
+            body_text = self.driver.find_element(By.TAG_NAME, 'body').text[:2000].lower()
+        except Exception:
+            pass
+
+        return (
+            '403 forbidden' in title or
+            '403 forbidden' in body_text or
+            'access denied' in body_text or
+            'request blocked' in body_text
+        )
+
+    def warmup_session(self):
+        warmup_url = "https://www.local.ch/fr"
+        try:
+            self.report_progress(
+                'session_warmup',
+                'Opening local.ch homepage before search',
+                current_url=warmup_url
+            )
+            self.driver.get(warmup_url)
+            time.sleep(random.uniform(2.5, 4.0))
+            self.handle_cookie_consent()
+            self.capture_debug_artifact("localch_homepage_warmup")
+        except Exception as e:
+            self.logger.warning(f"Warmup navigation failed: {e}")
 
 
     def export_to_excel(self, filename='scraped_results.xlsx'):
@@ -163,6 +292,65 @@ class LocalChScraper:
             return last_segment.split('-')[-1]
         return last_segment
 
+    @staticmethod
+    def _is_company_detail_url(url):
+        if not url:
+            return False
+
+        parsed = urlparse(url)
+        if parsed.netloc and 'local.ch' not in parsed.netloc:
+            return False
+
+        path = parsed.path or ''
+        if '/d/' not in path:
+            return False
+
+        return True
+
+    def extract_company_links_from_page(self):
+        selectors = [
+            "article[data-testid^='list-element'] > a[href*='/d/']",
+            "article[data-testid*='list'] a[href*='/d/']",
+            "main a[href*='/d/']",
+            "a[href*='/d/']",
+        ]
+
+        candidate_links = []
+        for selector in selectors:
+            try:
+                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                hrefs = [elem.get_attribute('href') for elem in elements if elem.get_attribute('href')]
+                valid_hrefs = [href for href in hrefs if self._is_company_detail_url(href)]
+                self.logger.info(f"Selector '{selector}' found {len(valid_hrefs)} valid detail links")
+                candidate_links.extend(valid_hrefs)
+            except Exception as e:
+                self.logger.debug(f"Selector '{selector}' failed: {e}")
+
+        # Fallback: inspect raw HTML if Selenium selectors miss the visible links.
+        if not candidate_links:
+            try:
+                soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+                hrefs = [a.get('href') for a in soup.find_all('a', href=True)]
+                normalized_hrefs = []
+                for href in hrefs:
+                    absolute_href = urljoin(self.driver.current_url, href)
+                    if self._is_company_detail_url(absolute_href):
+                        normalized_hrefs.append(absolute_href)
+                self.logger.info(f"HTML fallback found {len(normalized_hrefs)} valid detail links")
+                candidate_links.extend(normalized_hrefs)
+            except Exception as e:
+                self.logger.warning(f"HTML fallback extraction failed: {e}")
+
+        deduped_links = []
+        seen_keys = set()
+        for href in candidate_links:
+            key = self._url_key(href)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                deduped_links.append(href)
+
+        return deduped_links
+
     @retry_on_exception(retries=3, delay=5)
     def search_by_keyword(self, max_pages=None, start_page=1):
         """Search Local.ch by keyword and collect all company listings.
@@ -173,6 +361,7 @@ class LocalChScraper:
         """
         search_url = f"https://www.local.ch/fr/s/{self.keyword}"
         self.logger.info(f"Starting search for keyword: {self.keyword} (from page {start_page})")
+        self.warmup_session()
 
         company_links = []
         page_number = start_page
@@ -189,8 +378,31 @@ class LocalChScraper:
                     url = search_url
 
                 self.logger.info(f"Scraping search results page {page_number}: {url}")
+                self.report_progress(
+                    'search_page_loading',
+                    f'Loading local.ch search page {page_number}',
+                    page_number=page_number,
+                    current_url=url
+                )
 
                 self.driver.get(url)
+                time.sleep(random.uniform(2.0, 3.5))
+                self.handle_cookie_consent()
+                self.capture_debug_artifact(f"search_page_{page_number}_loaded")
+
+                if self._is_blocked_response():
+                    self.report_progress(
+                        'search_page_blocked',
+                        f'Blocked by local.ch on search page {page_number}',
+                        page_number=page_number,
+                        current_url=self.driver.current_url,
+                        page_title=self.driver.title
+                    )
+                    self.capture_debug_artifact(f"search_page_{page_number}_blocked")
+                    self.logger.error(f"Blocked by local.ch on search page {page_number}")
+                    raise LocalChBlockedError(
+                        f"local.ch blocked the scraper on search page {page_number} with an nginx 403/access denied page"
+                    )
 
                 # Wait for the page to load the listings
                 try:
@@ -212,51 +424,37 @@ class LocalChScraper:
 
                 while retry_count < max_retries:
                     try:
-                        # Re-find elements on each attempt to handle DOM updates
-                        link_elements = self.driver.find_elements(By.CSS_SELECTOR, "article[data-testid^='list-element'] > a[href*='/d/']")
+                        page_hrefs = self.extract_company_links_from_page()
 
-                        if not link_elements:
+                        if not page_hrefs:
+                            self.report_progress(
+                                'search_page_empty',
+                                f'No listing cards found on search page {page_number}',
+                                page_number=page_number,
+                                current_url=self.driver.current_url,
+                                page_title=self.driver.title
+                            )
+                            self.capture_debug_artifact(f"search_page_{page_number}_empty")
                             self.logger.info(f"No more results found on page {page_number}")
                             break
 
-                        self.logger.info(f"Found {len(link_elements)} link elements on page {page_number}")
-
-                        # Extract hrefs in one pass without storing element references
-                        temp_hrefs = []
-                        for i in range(len(link_elements)):
-                            try:
-                                # Re-find the specific element each time to avoid stale references
-                                current_elements = self.driver.find_elements(By.CSS_SELECTOR, "article[data-testid^='list-element'] > a[href*='/d/']")
-                                if i < len(current_elements):
-                                    link = current_elements[i].get_attribute('href')
-                                    if link:
-                                        temp_hrefs.append(link)
-                            except Exception as e:
-                                if i < 3:
-                                    self.logger.warning(f"Error extracting link {i}: {str(e)}")
-                                continue
-
-                        # If we successfully extracted some links, use them
-                        if temp_hrefs:
-                            page_hrefs = temp_hrefs
-                            for link in page_hrefs:
-                                if link not in company_links:
-                                    company_links.append(link)
-                            break
-                        else:
-                            # No links extracted, retry
-                            retry_count += 1
-                            if retry_count < max_retries:
-                                self.logger.warning(f"Failed to extract links, retrying ({retry_count}/{max_retries})...")
-                                import time
-                                time.sleep(1)
-                            continue
+                        self.logger.info(f"Found {len(page_hrefs)} company detail links on page {page_number}")
+                        self.report_progress(
+                            'search_page_loaded',
+                            f'Found {len(page_hrefs)} company detail links on search page {page_number}',
+                            page_number=page_number,
+                            current_url=self.driver.current_url,
+                            page_title=self.driver.title
+                        )
+                        for link in page_hrefs:
+                            if link not in company_links:
+                                company_links.append(link)
+                        break
 
                     except Exception as e:
                         retry_count += 1
                         if retry_count < max_retries:
                             self.logger.warning(f"Error finding elements, retrying ({retry_count}/{max_retries}): {str(e)}")
-                            import time
                             time.sleep(1)
                         else:
                             self.logger.error(f"Failed to extract links after {max_retries} retries: {str(e)}")
@@ -265,6 +463,14 @@ class LocalChScraper:
                 new_links = len(company_links) - page_links_before
                 unique_on_page = len(set(page_hrefs))
                 self.logger.info(f"Added {new_links} new unique company links from page {page_number} (found {unique_on_page} unique URLs on this page)")
+                self.report_progress(
+                    'search_page_processed',
+                    f'Processed search page {page_number}: {new_links} new links',
+                    page_number=page_number,
+                    current_url=self.driver.current_url,
+                    found_links=unique_on_page,
+                    new_links=new_links
+                )
 
                 # Check if there's a next page
                 try:
@@ -279,6 +485,13 @@ class LocalChScraper:
                     break
 
             except Exception as e:
+                self.capture_debug_artifact(f"search_page_{page_number}_error")
+                self.report_progress(
+                    'search_page_error',
+                    f'Error on search page {page_number}: {str(e)}',
+                    page_number=page_number,
+                    current_url=getattr(self.driver, 'current_url', url)
+                )
                 self.logger.error(f"Error on search page {page_number}: {str(e)}")
                 break
 
@@ -1022,7 +1235,13 @@ class LocalChScraper:
     def scrape_detail_page(self, url):
         """Scrape comprehensive data from a company detail page."""
         try:
+            self.report_progress(
+                'detail_page_loading',
+                f'Loading company detail page',
+                current_url=url
+            )
             self.driver.get(url)
+            self.capture_debug_artifact("detail_page_loaded")
 
             # Handle cookie consent popup first
             self.handle_cookie_consent()
@@ -1037,6 +1256,7 @@ class LocalChScraper:
                     )
                 )
             except TimeoutException:
+                self.capture_debug_artifact("detail_page_timeout")
                 self.logger.warning(f"Page load timeout for {url}")
 
         except Exception as e:
@@ -1382,6 +1602,11 @@ class LocalChScraper:
                 return
 
             self.logger.info(f"Found {len(company_links)} companies")
+            self.report_progress(
+                'search_complete',
+                f'Collected {len(company_links)} company links',
+                total_links=len(company_links)
+            )
 
             # Step 2: Scrape each company's detail page
             # Limit companies if max_companies is specified
@@ -1398,6 +1623,13 @@ class LocalChScraper:
                     continue
 
                 self.logger.info(f"Scraping company {i}/{max_companies}: {link}")
+                self.report_progress(
+                    'detail_page_queue',
+                    f'Scraping company {i}/{max_companies}',
+                    current_url=link,
+                    company_index=i,
+                    total_companies=max_companies
+                )
 
                 try:
                     detail_data = self.scrape_detail_page(link)

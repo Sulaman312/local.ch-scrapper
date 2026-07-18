@@ -84,6 +84,23 @@ function renderActiveJobs(jobs) {
             statusMessage = `${companiesScraped}${totalCompanies > 0 ? `/${totalCompanies}` : ''} ${window.i18n.t('activeJobs.companiesScraped')}`;
         }
 
+        const debugDetails = [];
+        if (job.current_stage) {
+            debugDetails.push(`<strong>Stage:</strong> ${job.current_stage}`);
+        }
+        if (job.current_page) {
+            debugDetails.push(`<strong>Page:</strong> ${job.current_page}`);
+        }
+        if (job.current_message) {
+            debugDetails.push(`<strong>Status:</strong> ${job.current_message}`);
+        }
+        if (job.current_url) {
+            debugDetails.push(`<strong>URL:</strong> ${truncate(job.current_url, 100)}`);
+        }
+        if (job.debug_artifact_dir) {
+            debugDetails.push(`<strong>Artifacts:</strong> ${job.debug_artifact_dir}`);
+        }
+
         return `
         <div class="job-card">
             <div class="job-header">
@@ -95,6 +112,11 @@ function renderActiveJobs(jobs) {
                 ${window.i18n.t('activeJobs.started')}: ${formatDate(job.started_at || job.created_at)} •
                 ${statusMessage}
             </div>
+            ${debugDetails.length > 0 ? `
+                <div class="job-meta" style="line-height: 1.6; color: var(--text-dark); margin-top: 0.5rem;">
+                    ${debugDetails.join('<br>')}
+                </div>
+            ` : ''}
             ${job.status === 'running' && totalCompanies > 0 ? `
                 <div class="progress-bar">
                     <div class="progress-fill" style="width: ${percentage}%"></div>
@@ -529,4 +551,8 @@ function formatDate(dateStr) {
     if (diffDays < 7) return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
 
     return date.toLocaleDateString();
+}
+
+function truncate(text, length) {
+    return text && text.length > length ? `${text.slice(0, length)}...` : text;
 }

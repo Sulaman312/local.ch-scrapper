@@ -25,7 +25,7 @@ load_dotenv()
 
 # Add scraper directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../scraper'))
-from scraper import LocalChScraper
+from scraper import LocalChScraper, LocalChBlockedError
 
 app = Flask(__name__)
 CORS(app)
@@ -48,6 +48,8 @@ PIPEDRIVE_IMPORT_ENABLED = os.getenv('ENABLE_PIPEDRIVE_IMPORT', 'false').strip()
 PIPEDRIVE_APP_BASE_URL = os.getenv('PIPEDRIVE_APP_BASE_URL', '').rstrip('/')
 PIPEDRIVE_APP_USERNAME = os.getenv('PIPEDRIVE_APP_USERNAME') or os.getenv('APP_USERNAME')
 PIPEDRIVE_APP_PASSWORD = os.getenv('PIPEDRIVE_APP_PASSWORD') or os.getenv('APP_PASSWORD')
+SCRAPER_DEBUG_MODE = os.getenv('SCRAPER_DEBUG_MODE', 'false').strip().lower() == 'true'
+SCRAPER_SAVE_DEBUG_ARTIFACTS = os.getenv('SCRAPER_SAVE_DEBUG_ARTIFACTS', 'false').strip().lower() == 'true'
 
 # Hardcoded users - in production, use database with hashed passwords
 USERS = {
@@ -114,12 +116,46 @@ app.json = CustomJSONProvider(app)
 
 def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page=1, check_websites=False, check_moneyhouse=False, check_architectes=False, check_bienvivre=False, check_zip=False):
     """Run scraper in background and save results to MongoDB"""
+    scraper = None
     try:
         # Update job status to running
         jobs_collection.update_one(
             {'_id': ObjectId(job_id)},
-            {'$set': {'status': 'running', 'started_at': datetime.now(timezone.utc)}}
+            {'$set': {
+                'status': 'running',
+                'started_at': datetime.now(timezone.utc),
+                'debug_mode': SCRAPER_DEBUG_MODE,
+                'debug_artifacts_enabled': SCRAPER_SAVE_DEBUG_ARTIFACTS,
+                'current_stage': 'starting',
+                'current_message': 'Initializing scraper',
+                'current_page': None,
+                'current_url': None,
+                'page_title': None,
+                'found_links': 0,
+                'new_links': 0,
+                'last_progress_at': datetime.now(timezone.utc)
+            }}
         )
+
+        def progress_callback(stage, message, **extra):
+            update_fields = {
+                'current_stage': stage,
+                'current_message': message,
+                'last_progress_at': datetime.now(timezone.utc)
+            }
+            allowed_fields = [
+                'page_number', 'current_url', 'page_title', 'found_links',
+                'new_links', 'total_links', 'company_index', 'total_companies'
+            ]
+            for field in allowed_fields:
+                if field in extra:
+                    mapped_field = 'current_page' if field == 'page_number' else field
+                    update_fields[mapped_field] = extra[field]
+
+            jobs_collection.update_one(
+                {'_id': ObjectId(job_id)},
+                {'$set': update_fields}
+            )
 
         # Create scraper instance
         scraper = LocalChScraper(
@@ -128,7 +164,10 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page
             check_moneyhouse=check_moneyhouse,
             check_architectes=check_architectes,
             check_bienvivre=check_bienvivre,
-            check_zip=check_zip
+            check_zip=check_zip,
+            debug_mode=SCRAPER_DEBUG_MODE,
+            save_debug_artifacts=SCRAPER_SAVE_DEBUG_ARTIFACTS,
+            progress_callback=progress_callback
         )
 
         # Setup driver first
@@ -241,11 +280,30 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page
                     'completed_at': datetime.now(timezone.utc),
                     'total_companies': companies_scraped,
                     'companies_scraped': companies_scraped,
-                    'progress': 100
+                    'progress': 100,
+                    'current_stage': status,
+                    'current_message': f'Scrape {status}',
+                    'debug_artifact_dir': str(scraper.debug_dir) if scraper and scraper.debug_dir else None
                 }
             }
         )
 
+    except LocalChBlockedError as e:
+        companies_scraped = companies_collection.count_documents({'job_id': ObjectId(job_id)})
+        jobs_collection.update_one(
+            {'_id': ObjectId(job_id)},
+            {
+                '$set': {
+                    'status': 'failed',
+                    'error_message': str(e),
+                    'completed_at': datetime.now(timezone.utc),
+                    'companies_scraped': companies_scraped,
+                    'current_stage': 'search_page_blocked',
+                    'current_message': str(e),
+                    'debug_artifact_dir': str(scraper.debug_dir) if scraper and scraper.debug_dir else None
+                }
+            }
+        )
     except Exception as e:
         # Update job with error
         companies_scraped = companies_collection.count_documents({'job_id': ObjectId(job_id)})
@@ -256,7 +314,10 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page
                     'status': 'failed',
                     'error_message': str(e),
                     'completed_at': datetime.now(timezone.utc),
-                    'companies_scraped': companies_scraped
+                    'companies_scraped': companies_scraped,
+                    'current_stage': 'failed',
+                    'current_message': str(e),
+                    'debug_artifact_dir': str(scraper.debug_dir) if scraper and scraper.debug_dir else None
                 }
             }
         )

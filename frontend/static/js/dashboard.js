@@ -390,6 +390,7 @@ async function handleStartScrape(e) {
     const checkArchitectes = document.getElementById('checkArchitectes').checked;
     const checkBienvivre = document.getElementById('checkBienvivre').checked;
     const checkZip = document.getElementById('checkZip').checked;
+    const includeIndependents = document.getElementById('includeIndependents').checked;
 
     if (!keyword) {
         showAlert('Please enter a keyword', 'warning');
@@ -453,6 +454,7 @@ async function handleStartScrape(e) {
                 max_pages: adjustedMaxPages,
                 max_companies: maxCompanies,
                 start_page: startPage,
+                include_independents: includeIndependents,
                 check_websites: checkWebsites,
                 check_moneyhouse: checkMoneyhouse,
                 check_architectes: checkArchitectes,

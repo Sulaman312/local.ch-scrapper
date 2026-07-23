@@ -233,7 +233,7 @@ function renderResults(companies) {
     if (!companies || companies.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="13" style="text-align: center; padding: 3rem;">
+                <td colspan="15" style="text-align: center; padding: 3rem;">
                     <div class="empty-state">
                         <div class="empty-state-icon"><i class="fas fa-search" style="font-size: 3rem; color: var(--text-gray);"></i></div>
                         <div class="empty-state-text">No companies found</div>
@@ -258,6 +258,7 @@ function renderResults(companies) {
                 </td>
                 <td><strong>${company.title || 'N/A'}</strong></td>
                 <td>${company.city || 'N/A'}</td>
+                <td>${company.canton || 'N/A'}</td>
                 <td>${renderMultiValue(phones, 'phone', company._id)}</td>
                 <td>${renderMultiValue(emails, 'email', company._id)}</td>
                 <td>${renderMultiValue(websites, 'website', company._id)}</td>
@@ -356,11 +357,26 @@ function getScoreClass(score) {
     return 'score-low';
 }
 
+function normalizeModalList(value) {
+    if (!value) return [];
+    if (Array.isArray(value)) {
+        return value.map(item => String(item).trim()).filter(Boolean);
+    }
+    if (typeof value === 'string') {
+        return value.split(',').map(item => item.trim()).filter(Boolean);
+    }
+    return [String(value).trim()].filter(Boolean);
+}
+
 // View company details modal
 async function viewCompany(companyId) {
     try {
         const response = await fetch(`${API_BASE}/api/companies/${companyId}`);
         const company = await response.json();
+
+        if (!response.ok) {
+            throw new Error(company.error || 'Failed to load company details');
+        }
 
         const modal = document.getElementById('companyModal');
         const modalTitle = document.getElementById('modalTitle');
@@ -368,8 +384,9 @@ async function viewCompany(companyId) {
 
         modalTitle.textContent = company.title || 'Company Details';
 
-        const phones = company.phone_numbers ? company.phone_numbers.split(',').map(p => p.trim()) : [];
+        const phones = normalizeModalList(company.phone_numbers || company.phone_numbers_raw);
         const emails = company.email ? [company.email] : [];
+        const languages = normalizeModalList(company.languages);
 
         modalContent.innerHTML = `
             <div style="display: grid; gap: 1.5rem;">
@@ -390,6 +407,10 @@ async function viewCompany(companyId) {
                         <tr style="border-bottom: 1px solid var(--border-gray);">
                             <td style="padding: 0.75rem 0; font-weight: 600; width: 30%;">Address</td>
                             <td style="padding: 0.75rem 0;">${company.street || 'N/A'}, ${company.zipcode || ''} ${company.city || ''}</td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid var(--border-gray);">
+                            <td style="padding: 0.75rem 0; font-weight: 600;">Canton</td>
+                            <td style="padding: 0.75rem 0;">${company.canton || 'N/A'}</td>
                         </tr>
                         <tr style="border-bottom: 1px solid var(--border-gray);">
                             <td style="padding: 0.75rem 0; font-weight: 600; vertical-align: top;">Phone Numbers</td>
@@ -457,10 +478,10 @@ async function viewCompany(companyId) {
                             <td style="padding: 0.75rem 0; font-weight: 600;">Zip.ch</td>
                             <td style="padding: 0.75rem 0;">${renderBooleanBadge(company.zip)}</td>
                         </tr>
-                        ${company.languages && company.languages.length > 0 ? `
+                        ${languages.length > 0 ? `
                         <tr style="border-bottom: 1px solid var(--border-gray);">
                             <td style="padding: 0.75rem 0; font-weight: 600;">Languages</td>
-                            <td style="padding: 0.75rem 0;">${company.languages.join(', ')}</td>
+                            <td style="padding: 0.75rem 0;">${languages.join(', ')}</td>
                         </tr>
                         ` : ''}
                         ${company.copyright_year ? `

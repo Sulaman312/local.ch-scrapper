@@ -9,6 +9,7 @@ import logging
 import re
 import os
 import requests
+import json
 from datetime import datetime
 from functools import wraps
 from bs4 import BeautifulSoup
@@ -16,6 +17,7 @@ from urllib.parse import urljoin, urlparse
 import urllib3
 import random
 from pathlib import Path
+from pymongo import MongoClient
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -28,6 +30,33 @@ USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+]
+
+LEGAL_FORM_CLASSIFIER_VERSION = "legal_form_v2"
+SWISS_LEGAL_FORMS = [
+    "AG",
+    "SA",
+    "SARL",
+    "SÀRL",
+    "SAGL",
+    "GMBH",
+    "SNC",
+    "SENC",
+    "KLG",
+    "SCRL",
+    "SICAV",
+    "SICAF",
+    "STIFTUNG",
+    "FONDATION",
+    "FONDAZIONE",
+    "VEREIN",
+    "ASSOCIATION",
+    "ASSOCIAZIONE",
+    "GENOSSENSCHAFT",
+    "COOPÉRATIVE",
+    "COOPERATIVE",
+    "COOPERATIVA",
+    "ANSTALT",
 ]
 
 def retry_on_exception(retries=3, delay=5):
@@ -55,9 +84,11 @@ class LocalChBlockedError(RuntimeError):
     """Raised when local.ch serves an anti-bot or 403 block page."""
 
 class LocalChScraper:
-    def __init__(self, keyword="plumber", check_websites=False, check_moneyhouse=False, check_architectes=False, check_bienvivre=False, check_zip=False,
+    def __init__(self, keyword="plumber", include_independents=False, check_websites=False, check_moneyhouse=False,
+                 check_architectes=False, check_bienvivre=False, check_zip=False,
                  debug_mode=False, save_debug_artifacts=False, progress_callback=None):
         self.keyword = keyword
+        self.include_independents = include_independents
         self.check_websites = check_websites
         self.check_moneyhouse = check_moneyhouse
         self.check_architectes = check_architectes
@@ -72,6 +103,12 @@ class LocalChScraper:
         self.cookie_consent_handled = False  # Only handle once per session
         self.debug_dir = None
         self.user_agent = random.choice(USER_AGENTS)
+        self.openai_api_key = os.getenv('OPENAI_API_KEY', '').strip()
+        self.openai_model = os.getenv('OPENAI_CLASSIFIER_MODEL', 'gpt-4o-mini').strip() or 'gpt-4o-mini'
+        self.openai_timeout = int(os.getenv('OPENAI_CLASSIFIER_TIMEOUT_SECONDS', '30'))
+        self.openai_enabled = bool(self.openai_api_key)
+        self.classifications_collection = None
+        self._openai_session = requests.Session()
 
         # Setup logging
         log_filename = f'scraping_log_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
@@ -91,6 +128,22 @@ class LocalChScraper:
             self.debug_dir = Path.cwd() / "scraper_debug" / f"{timestamp}_{safe_keyword}"
             self.debug_dir.mkdir(parents=True, exist_ok=True)
             self.logger.info(f"Debug artifacts will be saved to: {self.debug_dir}")
+
+        self._setup_title_classification_cache()
+
+    def _setup_title_classification_cache(self):
+        mongo_uri = os.getenv('MONGO_URI', '').strip()
+        if not mongo_uri:
+            return
+
+        try:
+            mongo_client = MongoClient(mongo_uri)
+            mongo_db = mongo_client['localch_scraper']
+            self.classifications_collection = mongo_db['title_classifications']
+            self.classifications_collection.create_index('normalized_title', unique=True)
+        except Exception as e:
+            self.logger.warning(f"Could not initialize title classification cache: {e}")
+            self.classifications_collection = None
 
     def report_progress(self, stage, message, **extra):
         if self.progress_callback:
@@ -126,6 +179,7 @@ class LocalChScraper:
         from selenium.webdriver.chrome.service import Service
 
         options = webdriver.ChromeOptions()
+        options.page_load_strategy = 'eager'
 
         headed_mode = os.getenv('SCRAPER_HEADED', 'false').strip().lower() == 'true'
         if not headed_mode:
@@ -385,7 +439,11 @@ class LocalChScraper:
                     current_url=url
                 )
 
-                self.driver.get(url)
+                try:
+                    self.driver.get(url)
+                except TimeoutException:
+                    self.capture_debug_artifact(f"search_page_{page_number}_timeout")
+                    self.logger.warning(f"Search page load timeout for {url}; continuing with partial DOM")
                 time.sleep(random.uniform(2.0, 3.5))
                 self.handle_cookie_consent()
                 self.capture_debug_artifact(f"search_page_{page_number}_loaded")
@@ -421,6 +479,7 @@ class LocalChScraper:
                 page_hrefs = []
                 retry_count = 0
                 max_retries = 3
+                should_stop_search = False
 
                 while retry_count < max_retries:
                     try:
@@ -436,6 +495,7 @@ class LocalChScraper:
                             )
                             self.capture_debug_artifact(f"search_page_{page_number}_empty")
                             self.logger.info(f"No more results found on page {page_number}")
+                            should_stop_search = True
                             break
 
                         self.logger.info(f"Found {len(page_hrefs)} company detail links on page {page_number}")
@@ -471,6 +531,12 @@ class LocalChScraper:
                     found_links=unique_on_page,
                     new_links=new_links
                 )
+
+                if should_stop_search or unique_on_page == 0:
+                    self.logger.info(
+                        f"Stopping search pagination after page {page_number} because no visible company links were found"
+                    )
+                    break
 
                 # Check if there's a next page
                 try:
@@ -1191,6 +1257,241 @@ class LocalChScraper:
             return street, zipcode, city, kanton.strip()
 
         return address_text, '', '', ''
+    
+    def normalize_swiss_phone(self, raw):
+        if not raw:
+            return None
+        
+        cleaned = re.sub(r"[^\d+]", "", raw.strip())
+
+        if cleaned.startswith("00"):
+            cleaned = "+" + cleaned[2:]
+
+        if re.fullmatch(r"\+41\d{9}", cleaned):
+            return cleaned
+
+        if re.fullmatch(r"0\d{9}", cleaned):
+            return "+41" + cleaned[1:]
+
+        if re.fullmatch(r"\d{9}", cleaned):
+            return "+41" + cleaned
+
+        if re.fullmatch(r"41\d{9}", cleaned):
+            return "+" + cleaned
+        
+        return None
+
+    def normalize_phone_list(self, raw):
+        if not raw:
+            return ''
+        
+        parts = re.split(r"[,;/]", raw)
+        normalized = []
+        seen = set()
+
+        for part in parts:
+            value = self.normalize_swiss_phone(part)
+            if value and value not in seen:
+                seen.add(value)
+                normalized.append(value)
+        
+        return ", ".join(normalized)
+
+
+    def detect_independent(self, title):
+        if not title or not title.strip():
+            return None
+        classification = self.classify_title_with_openai(title)
+        return classification.get('is_independent') if classification else None
+
+    def normalize_title_for_cache(self, title):
+        normalized = re.sub(r'\s+', ' ', (title or '').casefold()).strip()
+        return normalized
+
+    def get_cached_title_classification(self, title):
+        if self.classifications_collection is None:
+            return None
+
+        normalized_title = self.normalize_title_for_cache(title)
+        if not normalized_title:
+            return None
+
+        cached = self.classifications_collection.find_one({'normalized_title': normalized_title})
+        if not cached:
+            return None
+        if cached.get('classifier_version') != LEGAL_FORM_CLASSIFIER_VERSION:
+            return None
+        return cached
+
+    def save_title_classification(self, title, classification):
+        if self.classifications_collection is None:
+            return
+
+        normalized_title = self.normalize_title_for_cache(title)
+        if not normalized_title:
+            return
+
+        document = {
+            'normalized_title': normalized_title,
+            'original_title': title,
+            'is_independent': classification.get('is_independent'),
+            'classification': classification.get('classification'),
+            'detected_legal_form': classification.get('detected_legal_form'),
+            'reason': classification.get('reason'),
+            'confidence': classification.get('confidence'),
+            'source': classification.get('source', 'openai_legal_form'),
+            'model': self.openai_model,
+            'classifier_version': LEGAL_FORM_CLASSIFIER_VERSION,
+            'updated_at': datetime.utcnow(),
+        }
+
+        self.classifications_collection.update_one(
+            {'normalized_title': normalized_title},
+            {'$set': document, '$setOnInsert': {'created_at': datetime.utcnow()}},
+            upsert=True
+        )
+
+    def classify_title_with_openai(self, title):
+        cached = self.get_cached_title_classification(title)
+        if cached:
+            return {
+                'is_independent': cached.get('is_independent'),
+                'classification': cached.get('classification'),
+                'detected_legal_form': cached.get('detected_legal_form'),
+                'reason': cached.get('reason'),
+                'confidence': cached.get('confidence'),
+                'source': cached.get('source', 'openai_cache'),
+            }
+
+        if not self.openai_enabled:
+            self.logger.warning("OPENAI_API_KEY is not configured; independent classification is disabled")
+            return None
+
+        legal_forms_text = ", ".join(SWISS_LEGAL_FORMS)
+        system_prompt = (
+            "You detect legal forms in Swiss company titles. "
+            "Return structured JSON only. "
+            "Classify based only on the title string, without inventing facts. "
+            "Your only task is to detect whether the title explicitly contains or directly expresses "
+            "one of these legal forms, including obvious case or accent variants: "
+            f"{legal_forms_text}. "
+            "Do not infer from clinic wording, brand names, doctor names, plurals, or business style. "
+            "If a listed legal form is explicitly present, return 'has_legal_form'. "
+            "If no listed legal form is explicitly present, return 'no_legal_form'. "
+            "Never return an ambiguous answer."
+        )
+        user_prompt = (
+            f'Check this Swiss company title: "{title}". '
+            "Answer only based on whether one of the allowed legal forms is explicitly present."
+        )
+        payload = {
+            'model': self.openai_model,
+            'messages': [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_prompt}
+            ],
+            'response_format': {
+                'type': 'json_schema',
+                'json_schema': {
+                    'name': 'company_title_classification',
+                    'strict': True,
+                    'schema': {
+                        'type': 'object',
+                        'additionalProperties': False,
+                        'properties': {
+                            'classification': {
+                                'type': 'string',
+                                'enum': ['has_legal_form', 'no_legal_form']
+                            },
+                            'detected_legal_form': {
+                                'type': ['string', 'null']
+                            },
+                            'confidence': {
+                                'type': 'number'
+                            },
+                            'reason': {
+                                'type': 'string'
+                            }
+                        },
+                        'required': ['classification', 'detected_legal_form', 'confidence', 'reason']
+                    }
+                }
+            }
+        }
+
+        try:
+            response = self._openai_session.post(
+                'https://api.openai.com/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {self.openai_api_key}',
+                    'Content-Type': 'application/json',
+                },
+                json=payload,
+                timeout=self.openai_timeout
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = data['choices'][0]['message']['content']
+            parsed = json.loads(content)
+            classification_value = parsed.get('classification')
+            has_legal_form = classification_value == 'has_legal_form'
+
+            result = {
+                'is_independent': not has_legal_form,
+                'classification': classification_value,
+                'detected_legal_form': parsed.get('detected_legal_form'),
+                'reason': parsed.get('reason'),
+                'confidence': parsed.get('confidence'),
+                'source': 'openai_legal_form',
+            }
+            self.save_title_classification(title, result)
+            return result
+        except Exception as e:
+            self.logger.warning(f"OpenAI title classification failed for '{title}': {e}")
+            return None
+
+    def should_skip_independent(self, title):
+        is_independent = self.detect_independent(title)
+        return is_independent is True and not self.include_independents
+
+
+    def derive_canton_from_zip(self, zipcode):
+        if not zipcode:
+            return ""
+        
+        zipcode = str(zipcode).strip()
+
+        if not re.fullmatch(r"\d{4}", zipcode):
+            return ""
+        
+        zip_int = int(zipcode)
+
+        canton_ranges = [
+          ((1000, 1299), "VD"),
+          ((1200, 1299), "GE"),
+          ((1400, 1499), "VD"),
+          ((1500, 1799), "FR"),
+          ((1800, 1899), "VD"),
+          ((1900, 1999), "VS"),
+          ((2000, 2999), "NE"),
+          ((2300, 2399), "JU"),
+          ((2500, 2999), "BE"),
+          ((3000, 3999), "BE"),
+          ((4000, 4699), "BS/BL"),
+          ((5000, 5799), "AG"),
+          ((6000, 6499), "LU"),
+          ((6500, 6999), "TI"),
+          ((7000, 7999), "GR"),
+          ((8000, 8999), "ZH"),
+          ((9000, 9999), "SG"),
+        ]
+
+        for (start, end), canton in canton_ranges:
+            if start <= zip_int <= end:
+                return canton
+            
+        return ""
+
 
     def handle_cookie_consent(self):
         """Handle cookie consent popup — only acts once per scraper session."""
@@ -1271,7 +1572,10 @@ class LocalChScraper:
             'street': '',
             'zipcode': '',
             'city': '',
+            'canton': '',
+            'address_enriched': False,
             'phone_numbers': '',
+            'phone_numbers_raw': '',
             'email': '',
             'website': '',
             'description': '',
@@ -1299,7 +1603,11 @@ class LocalChScraper:
             'languages': [],
             'forms_of_contact': [],
             'location_attributes': [],
-            'categories': []
+            'categories': [],
+            'is_independent': None,
+            'independent_classification': '',
+            'independent_classification_reason': '',
+            'independent_classification_source': ''
         }
 
         # Get title
@@ -1307,6 +1615,21 @@ class LocalChScraper:
             title = self.driver.find_element(By.CSS_SELECTOR, "[data-cy='header-title']")
             detail_data['title'] = title.text.strip()
             self.logger.info(f"  ✓ Title: {detail_data['title']}")
+            classification = self.classify_title_with_openai(detail_data['title'])
+            if classification:
+                detail_data['is_independent'] = classification.get('is_independent')
+                detail_data['independent_classification'] = classification.get('classification') or ''
+                detail_data['independent_classification_reason'] = classification.get('reason') or ''
+                detail_data['independent_classification_source'] = classification.get('source') or ''
+            if self.should_skip_independent(detail_data['title']):
+                self.logger.info("  Skipping independent company due to scrape settings")
+                self.report_progress(
+                    'detail_page_skipped',
+                    'Skipped independent company',
+                    current_url=url,
+                    page_title=detail_data['title']
+                )
+                return None
         except NoSuchElementException:
             self.logger.warning(f"  ✗ Title not found")
 
@@ -1332,11 +1655,15 @@ class LocalChScraper:
                         if 'Adresse:' in line or 'Address:' in line:
                             if i + 1 < len(lines):
                                 address_text = lines[i + 1].strip()
-                                street, zipcode, city, _ = self.parse_address(address_text)
+                                street, zipcode, city, canton = self.parse_address(address_text)
+                                if not canton:
+                                    canton = self.derive_canton_from_zip(zipcode)
                                 detail_data.update({
                                     'street': street,
                                     'zipcode': zipcode,
-                                    'city': city
+                                    'city': city,
+                                    'canton': canton,
+                                    'address_enriched': bool(street and zipcode and city and canton)
                                 })
                                 self.logger.info(f"  ✓ Address: {street}, {zipcode} {city}")
                                 break
@@ -1368,10 +1695,10 @@ class LocalChScraper:
 
                             if collected_phones:
                                 phone_str = ', '.join(collected_phones)
-                                if not detail_data['phone_numbers']:
-                                    detail_data['phone_numbers'] = phone_str
+                                if not detail_data['phone_numbers_raw']:
+                                    detail_data['phone_numbers_raw'] = phone_str
                                 else:
-                                    detail_data['phone_numbers'] += f", {phone_str}"
+                                    detail_data['phone_numbers_raw'] += f", {phone_str}"
                                 self.logger.info(f"  ✓ Phone: {phone_str}")
 
                         # Get email
@@ -1465,6 +1792,9 @@ class LocalChScraper:
                     self.logger.info(f"  ✓ Average rating: {detail_data['average_rating']}")
             except Exception as e:
                 self.logger.warning(f"  Error parsing average rating: {str(e)}")
+
+        detail_data['phone_numbers'] = self.normalize_phone_list(detail_data['phone_numbers_raw'])
+
 
         # Get languages
         try:

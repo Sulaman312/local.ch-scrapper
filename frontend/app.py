@@ -114,7 +114,26 @@ class CustomJSONProvider(DefaultJSONProvider):
 app.json = CustomJSONProvider(app)
 
 
-def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page=1, check_websites=False, check_moneyhouse=False, check_architectes=False, check_bienvivre=False, check_zip=False):
+def sanitize_for_json(value):
+    """Recursively sanitize Mongo values for JSON responses."""
+    import math
+
+    if isinstance(value, ObjectId):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: sanitize_for_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitize_for_json(item) for item in value]
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    return value
+
+
+def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page=1, include_independents=False,
+                           check_websites=False, check_moneyhouse=False, check_architectes=False,
+                           check_bienvivre=False, check_zip=False):
     """Run scraper in background and save results to MongoDB"""
     scraper = None
     try:
@@ -160,6 +179,7 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page
         # Create scraper instance
         scraper = LocalChScraper(
             keyword=keyword,
+            include_independents=include_independents,
             check_websites=check_websites,
             check_moneyhouse=check_moneyhouse,
             check_architectes=check_architectes,
@@ -175,9 +195,10 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page
 
         # Get total companies to scrape
         company_links = scraper.search_by_keyword(max_pages=max_pages, start_page=start_page)
-        total_to_scrape = len(company_links)
         if max_companies and max_companies > 0:
-            total_to_scrape = min(max_companies, total_to_scrape)
+            total_to_scrape = max_companies
+        else:
+            total_to_scrape = len(company_links)
 
         # Update job with total expected companies
         jobs_collection.update_one(
@@ -212,14 +233,11 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page
 
         scraper.scrape_detail_page = scrape_detail_with_save
 
-        # Now scrape the companies (we already have the links)
-        # We need to manually iterate through company_links instead of calling scrape()
-        if max_companies and max_companies > 0:
-            max_companies_to_process = min(max_companies, len(company_links))
-        else:
-            max_companies_to_process = len(company_links)
+        target_companies = max_companies if max_companies and max_companies > 0 else None
+        attempted_links = 0
+        saved_companies = 0
 
-        for i, link in enumerate(company_links[:max_companies_to_process], 1):
+        for link in company_links:
             # Check if job should be stopped
             if job_id in stop_flags and stop_flags[job_id]:
                 scraper.logger.info(f"Job {job_id} stopped by user request")
@@ -228,9 +246,15 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page
             if link in scraper.processed_urls:
                 continue
 
+            if target_companies is not None and saved_companies >= target_companies:
+                scraper.logger.info(f"Reached target of {target_companies} kept companies")
+                break
+
+            attempted_links += 1
+
             # Restart Chrome every 10 companies to prevent memory issues
-            if i > 1 and (i - 1) % 10 == 0:
-                scraper.logger.info(f"Restarting Chrome after {i - 1} companies to clear memory...")
+            if attempted_links > 1 and (attempted_links - 1) % 10 == 0:
+                scraper.logger.info(f"Restarting Chrome after {attempted_links - 1} processed links to clear memory...")
                 try:
                     if scraper.driver:
                         scraper.driver.quit()
@@ -243,7 +267,10 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page
                     # Try to continue anyway
                     pass
 
-            scraper.logger.info(f"Scraping company {i}/{max_companies_to_process}: {link}")
+            target_display = target_companies if target_companies is not None else len(company_links)
+            scraper.logger.info(
+                f"Scraping company candidate {attempted_links} (kept {saved_companies}/{target_display}): {link}"
+            )
 
             try:
                 detail_data = scraper.scrape_detail_page(link)
@@ -251,6 +278,7 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page
                 if detail_data:
                     scraper.results.append(detail_data)
                     scraper.processed_urls.add(link)
+                    saved_companies += 1
 
             except Exception as e:
                 scraper.logger.error(f"Error processing link {link}: {str(e)}")
@@ -545,6 +573,7 @@ def start_scrape():
     check_architectes = data.get('check_architectes', False)
     check_bienvivre = data.get('check_bienvivre', False)
     check_zip = data.get('check_zip', False)
+    include_independents = data.get('include_independents', False)
 
     if not keyword:
         return jsonify({'error': 'Keyword is required'}), 400
@@ -555,6 +584,7 @@ def start_scrape():
         'max_pages': max_pages,
         'max_companies': max_companies,
         'start_page': start_page,
+        'include_independents': include_independents,
         'check_websites': check_websites,
         'check_moneyhouse': check_moneyhouse,
         'check_architectes': check_architectes,
@@ -576,7 +606,8 @@ def start_scrape():
     # Start scraper in background thread
     thread = threading.Thread(
         target=run_scraper_background,
-        args=(job_id, keyword, max_pages, max_companies, start_page, check_websites, check_moneyhouse, check_architectes, check_bienvivre, check_zip)
+        args=(job_id, keyword, max_pages, max_companies, start_page, include_independents,
+              check_websites, check_moneyhouse, check_architectes, check_bienvivre, check_zip)
     )
     thread.daemon = True
     thread.start()
@@ -639,7 +670,6 @@ def get_companies():
         language = request.args.get('language')  # Comma-separated languages
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('per_page', 25, type=int)
-
         # Build query
         query = {}
         if keyword:
@@ -713,7 +743,7 @@ def get_company(company_id):
     company = companies_collection.find_one({'_id': ObjectId(company_id)})
     if not company:
         return jsonify({'error': 'Company not found'}), 404
-    return jsonify(company)
+    return jsonify(sanitize_for_json(company))
 
 
 @app.route('/api/companies/<company_id>/notes', methods=['PUT'])
@@ -753,7 +783,6 @@ def export_companies():
     min_reviews = request.args.get('min_reviews', type=int)
     city = request.args.get('city')
     language = request.args.get('language')
-
     df = build_export_dataframe(
         job_id=job_id,
         keyword=keyword,

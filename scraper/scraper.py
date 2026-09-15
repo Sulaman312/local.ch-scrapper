@@ -1,0 +1,2334 @@
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
+import pandas as pd
+import time
+import logging
+import re
+import os
+import requests
+import json
+from datetime import datetime
+from functools import wraps
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
+import urllib3
+import random
+from pathlib import Path
+from pymongo import MongoClient
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# List of realistic user agents for rotation
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+]
+
+LEGAL_FORM_CLASSIFIER_VERSION = "legal_form_v2"
+SWISS_LEGAL_FORMS = [
+    "AG",
+    "SA",
+    "SARL",
+    "SÀRL",
+    "SAGL",
+    "GMBH",
+    "SNC",
+    "SENC",
+    "KLG",
+    "SCRL",
+    "SICAV",
+    "SICAF",
+    "STIFTUNG",
+    "FONDATION",
+    "FONDAZIONE",
+    "VEREIN",
+    "ASSOCIATION",
+    "ASSOCIAZIONE",
+    "GENOSSENSCHAFT",
+    "COOPÉRATIVE",
+    "COOPERATIVE",
+    "COOPERATIVA",
+    "ANSTALT",
+]
+
+def retry_on_exception(retries=3, delay=5):
+    """Retry decorator with exponential backoff."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            retry_count = 0
+            while retry_count < retries:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    retry_count += 1
+                    if retry_count == retries:
+                        raise e
+                    wait_time = delay * (2 ** (retry_count - 1))
+                    logging.warning(f"Attempt {retry_count} failed. Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+            return None
+        return wrapper
+    return decorator
+
+
+class LocalChBlockedError(RuntimeError):
+    """Raised when local.ch serves an anti-bot or 403 block page."""
+
+class LocalChScraper:
+    def __init__(self, keyword="plumber", include_independents=False, check_websites=False, check_moneyhouse=False,
+                 check_architectes=False, check_bienvivre=False, check_zip=False, check_gmb=False,
+                 debug_mode=False, save_debug_artifacts=False, progress_callback=None):
+        self.keyword = keyword
+        self.include_independents = include_independents
+        self.check_websites = check_websites
+        self.check_moneyhouse = check_moneyhouse
+        self.check_architectes = check_architectes
+        self.check_bienvivre = check_bienvivre
+        self.check_zip = check_zip
+        self.check_gmb = check_gmb
+        self.debug_mode = debug_mode
+        self.save_debug_artifacts = save_debug_artifacts
+        self.progress_callback = progress_callback
+        self.driver = None
+        self.results = []
+        self.processed_urls = set()
+        self.cookie_consent_handled = False  # Only handle once per session
+        self.debug_dir = None
+        self.user_agent = random.choice(USER_AGENTS)
+        self.openai_api_key = os.getenv('OPENAI_API_KEY', '').strip()
+        self.openai_model = os.getenv('OPENAI_CLASSIFIER_MODEL', 'gpt-4o-mini').strip() or 'gpt-4o-mini'
+        self.openai_timeout = int(os.getenv('OPENAI_CLASSIFIER_TIMEOUT_SECONDS', '30'))
+        self.openai_enabled = bool(self.openai_api_key)
+        self.google_places_api_key = os.getenv('GOOGLE_PLACES_API_KEY', '').strip()
+        self.google_places_enabled = bool(self.google_places_api_key)
+        self.classifications_collection = None
+        self._openai_session = requests.Session()
+        self._places_session = requests.Session()
+
+        # Setup logging
+        log_filename = f'scraping_log_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_filename, encoding='utf-8'),
+                logging.StreamHandler()
+            ]
+        )
+        self.logger = logging.getLogger(__name__)
+
+        if self.save_debug_artifacts:
+            safe_keyword = re.sub(r'[^a-zA-Z0-9_-]+', '_', self.keyword).strip('_') or 'keyword'
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.debug_dir = Path.cwd() / "scraper_debug" / f"{timestamp}_{safe_keyword}"
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+            self.logger.info(f"Debug artifacts will be saved to: {self.debug_dir}")
+
+        self._setup_title_classification_cache()
+
+    def _setup_title_classification_cache(self):
+        mongo_uri = os.getenv('MONGO_URI', '').strip()
+        if not mongo_uri:
+            return
+
+        try:
+            mongo_client = MongoClient(mongo_uri)
+            mongo_db = mongo_client['localch_scraper']
+            self.classifications_collection = mongo_db['title_classifications']
+            self.classifications_collection.create_index('normalized_title', unique=True)
+        except Exception as e:
+            self.logger.warning(f"Could not initialize title classification cache: {e}")
+            self.classifications_collection = None
+
+    def report_progress(self, stage, message, **extra):
+        if self.progress_callback:
+            try:
+                self.progress_callback(stage=stage, message=message, **extra)
+            except Exception as e:
+                self.logger.warning(f"Failed to publish progress update: {e}")
+        self.logger.info(f"[{stage}] {message}")
+
+    def capture_debug_artifact(self, label):
+        if not self.save_debug_artifacts or not self.driver or not self.debug_dir:
+            return
+
+        safe_label = re.sub(r'[^a-zA-Z0-9_-]+', '_', label).strip('_') or 'step'
+        timestamp = datetime.now().strftime("%H%M%S")
+        screenshot_path = self.debug_dir / f"{timestamp}_{safe_label}.png"
+        html_path = self.debug_dir / f"{timestamp}_{safe_label}.html"
+
+        try:
+            self.driver.save_screenshot(str(screenshot_path))
+        except Exception as e:
+            self.logger.warning(f"Could not save screenshot for {label}: {e}")
+
+        try:
+            html_path.write_text(self.driver.page_source, encoding='utf-8')
+        except Exception as e:
+            self.logger.warning(f"Could not save page HTML for {label}: {e}")
+
+    def setup_driver(self):
+        """Initialize the Chrome WebDriver with anti-detection measures."""
+        import os
+        import shutil
+        from selenium.webdriver.chrome.service import Service
+
+        options = webdriver.ChromeOptions()
+        options.page_load_strategy = 'eager'
+
+        headed_mode = os.getenv('SCRAPER_HEADED', 'false').strip().lower() == 'true'
+        if not headed_mode:
+            options.add_argument('--headless=new')
+        options.add_argument('--window-size=1920,1080')  # Set viewport size for headless mode
+        options.add_argument('--disable-gpu')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-blink-features=AutomationControlled')
+        options.add_argument('--disable-features=IsolateOrigins,site-per-process')
+        options.add_argument('--disable-features=UserAgentClientHint')
+        options.add_argument('--ignore-certificate-errors')  # Handle SSL/TLS issues
+        options.add_argument('--allow-insecure-localhost')
+        options.add_argument('--lang=fr-CH,fr;q=0.9,en;q=0.8')
+        options.add_argument('--start-maximized')
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
+        options.add_experimental_option("prefs", {
+            "intl.accept_languages": "fr-CH,fr,en",
+            "credentials_enable_service": False,
+            "profile.password_manager_enabled": False,
+        })
+
+        options.add_argument(f'--user-agent={self.user_agent}')
+        self.logger.info(f"Using User-Agent: {self.user_agent}")
+
+        # For Railway/production - use system chromium and chromedriver
+        service = None
+        if os.path.exists('/nix/store'):
+            # Find chromium in nix store
+            chromium_path = shutil.which('chromium')
+            chromedriver_path = shutil.which('chromedriver')
+
+            if chromium_path:
+                options.binary_location = chromium_path
+                self.logger.info(f"Using system chromium: {chromium_path}")
+
+            if chromedriver_path:
+                service = Service(executable_path=chromedriver_path)
+                self.logger.info(f"Using system chromedriver: {chromedriver_path}")
+
+        try:
+            if service:
+                self.driver = webdriver.Chrome(service=service, options=options)
+            else:
+                self.driver = webdriver.Chrome(options=options)
+
+            self._configure_stealth()
+            self.driver.implicitly_wait(1)
+            self.driver.set_page_load_timeout(15)
+            self.logger.info("WebDriver initialized successfully")
+            self.report_progress(
+                'driver_ready',
+                f"Chrome ready in {'headed' if headed_mode else 'headless'} mode",
+                current_url='',
+                page_number=None
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to initialize WebDriver: {str(e)}")
+            raise
+
+    def _configure_stealth(self):
+        self.driver.execute_cdp_cmd("Network.enable", {})
+        self.driver.execute_cdp_cmd("Network.setExtraHTTPHeaders", {
+            "headers": {
+                "Accept-Language": "fr-CH,fr;q=0.9,en;q=0.8",
+                "Upgrade-Insecure-Requests": "1",
+                "DNT": "1",
+            }
+        })
+        self.driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {
+            "timezoneId": "Europe/Zurich"
+        })
+        self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'language', {get: () => 'fr-CH'});
+                Object.defineProperty(navigator, 'languages', {get: () => ['fr-CH', 'fr', 'en']});
+                Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+                Object.defineProperty(navigator, 'vendor', {get: () => 'Google Inc.'});
+                Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+                Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+                Object.defineProperty(screen, 'colorDepth', {get: () => 24});
+                window.chrome = {
+                    runtime: {},
+                    app: {},
+                    loadTimes: function() {},
+                    csi: function() {}
+                };
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications'
+                        ? Promise.resolve({ state: Notification.permission })
+                        : originalQuery(parameters)
+                );
+                const getParameter = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                    if (parameter === 37445) return 'Intel Inc.';
+                    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+                    return getParameter.call(this, parameter);
+                };
+            """
+        })
+
+    def _is_blocked_response(self):
+        title = (self.driver.title or '').lower()
+        body_text = ''
+        try:
+            body_text = self.driver.find_element(By.TAG_NAME, 'body').text[:2000].lower()
+        except Exception:
+            pass
+
+        return (
+            '403 forbidden' in title or
+            '403 forbidden' in body_text or
+            'access denied' in body_text or
+            'request blocked' in body_text
+        )
+
+    def warmup_session(self):
+        warmup_url = "https://www.local.ch/fr"
+        try:
+            self.report_progress(
+                'session_warmup',
+                'Opening local.ch homepage before search',
+                current_url=warmup_url
+            )
+            self.driver.get(warmup_url)
+            time.sleep(random.uniform(2.5, 4.0))
+            self.handle_cookie_consent()
+            self.capture_debug_artifact("localch_homepage_warmup")
+        except Exception as e:
+            self.logger.warning(f"Warmup navigation failed: {e}")
+
+
+    def export_to_excel(self, filename='scraped_results.xlsx'):
+        """Export results to Excel file."""
+        try:
+            if not self.results:
+                self.logger.warning("No data to export")
+                return
+
+            df = pd.DataFrame(self.results)
+            df.to_excel(filename, index=False, engine='openpyxl')
+            self.logger.info(f"Data exported to {filename} with {len(df)} records")
+
+        except Exception as e:
+            self.logger.error(f"Error exporting to Excel: {str(e)}")
+
+    @staticmethod
+    def _url_key(url):
+        """Return the business-ID key for deduplication.
+
+        The last path segment is the unique business ID and never changes
+        across languages or category slugs.
+        e.g. https://www.local.ch/de/d/rossrueti/9512/tierarzt/achilles-vetclinic-ag-5f77dQV5imYD91gct1Sesw
+             https://www.local.ch/en/d/rossrueti/9512/vet/achilles-vetclinic-ag-5f77dQV5imYD91gct1Sesw
+        Both → '5f77dQV5imYD91gct1Sesw'  (the trailing hash ID)
+        """
+        parsed = urlparse(url)
+        last_segment = parsed.path.rstrip('/').split('/')[-1]
+        # Extract the hash suffix after the last '-' (e.g. 'achilles-vetclinic-ag-5f77dQV5imYD91gct1Sesw' → '5f77dQV5imYD91gct1Sesw')
+        if '-' in last_segment:
+            return last_segment.split('-')[-1]
+        return last_segment
+
+    @staticmethod
+    def _is_company_detail_url(url):
+        if not url:
+            return False
+
+        parsed = urlparse(url)
+        if parsed.netloc and 'local.ch' not in parsed.netloc:
+            return False
+
+        path = parsed.path or ''
+        if '/d/' not in path:
+            return False
+
+        return True
+
+    def extract_company_links_from_page(self):
+        selectors = [
+            "article[data-testid^='list-element'] > a[href*='/d/']",
+            "article[data-testid*='list'] a[href*='/d/']",
+            "main a[href*='/d/']",
+            "a[href*='/d/']",
+        ]
+
+        candidate_links = []
+        for selector in selectors:
+            try:
+                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                hrefs = [elem.get_attribute('href') for elem in elements if elem.get_attribute('href')]
+                valid_hrefs = [href for href in hrefs if self._is_company_detail_url(href)]
+                self.logger.info(f"Selector '{selector}' found {len(valid_hrefs)} valid detail links")
+                candidate_links.extend(valid_hrefs)
+            except Exception as e:
+                self.logger.debug(f"Selector '{selector}' failed: {e}")
+
+        # Fallback: inspect raw HTML if Selenium selectors miss the visible links.
+        if not candidate_links:
+            try:
+                soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+                hrefs = [a.get('href') for a in soup.find_all('a', href=True)]
+                normalized_hrefs = []
+                for href in hrefs:
+                    absolute_href = urljoin(self.driver.current_url, href)
+                    if self._is_company_detail_url(absolute_href):
+                        normalized_hrefs.append(absolute_href)
+                self.logger.info(f"HTML fallback found {len(normalized_hrefs)} valid detail links")
+                candidate_links.extend(normalized_hrefs)
+            except Exception as e:
+                self.logger.warning(f"HTML fallback extraction failed: {e}")
+
+        deduped_links = []
+        seen_keys = set()
+        for href in candidate_links:
+            key = self._url_key(href)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                deduped_links.append(href)
+
+        return deduped_links
+
+    @retry_on_exception(retries=3, delay=5)
+    def search_by_keyword(self, max_pages=None, start_page=1):
+        """Search Local.ch by keyword and collect all company listings.
+
+        Args:
+            max_pages: Maximum number of pages to scrape
+            start_page: Page number to start from (default: 1)
+        """
+        search_url = f"https://www.local.ch/fr/s/{self.keyword}"
+        self.logger.info(f"Starting search for keyword: {self.keyword} (from page {start_page})")
+        self.warmup_session()
+
+        company_links = []
+        page_number = start_page
+
+        while True:
+            try:
+                # Add page parameter if needed
+                if page_number > 1:
+                    if '?' in search_url:
+                        url = f"{search_url}&page={page_number}"
+                    else:
+                        url = f"{search_url}?page={page_number}"
+                else:
+                    url = search_url
+
+                self.logger.info(f"Scraping search results page {page_number}: {url}")
+                self.report_progress(
+                    'search_page_loading',
+                    f'Loading local.ch search page {page_number}',
+                    page_number=page_number,
+                    current_url=url
+                )
+
+                try:
+                    self.driver.get(url)
+                except TimeoutException:
+                    self.capture_debug_artifact(f"search_page_{page_number}_timeout")
+                    self.logger.warning(f"Search page load timeout for {url}; continuing with partial DOM")
+                time.sleep(random.uniform(2.0, 3.5))
+                self.handle_cookie_consent()
+                self.capture_debug_artifact(f"search_page_{page_number}_loaded")
+
+                if self._is_blocked_response():
+                    self.report_progress(
+                        'search_page_blocked',
+                        f'Blocked by local.ch on search page {page_number}',
+                        page_number=page_number,
+                        current_url=self.driver.current_url,
+                        page_title=self.driver.title
+                    )
+                    self.capture_debug_artifact(f"search_page_{page_number}_blocked")
+                    self.logger.error(f"Blocked by local.ch on search page {page_number}")
+                    raise LocalChBlockedError(
+                        f"local.ch blocked the scraper on search page {page_number} with an nginx 403/access denied page"
+                    )
+
+                # Wait for the page to load the listings
+                try:
+                    from selenium.webdriver.support.ui import WebDriverWait
+                    from selenium.webdriver.support import expected_conditions as EC
+                    WebDriverWait(self.driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "article[data-testid^='list-element']"))
+                    )
+                except:
+                    pass  # Continue even if wait times out
+
+                # Find all company detail links directly (more stable than iterating through cards)
+                # Use more specific selector to get only the main company link (not images/buttons)
+                # Extract hrefs immediately to avoid stale element references
+                page_links_before = len(company_links)
+                page_hrefs = []
+                retry_count = 0
+                max_retries = 3
+                should_stop_search = False
+
+                while retry_count < max_retries:
+                    try:
+                        page_hrefs = self.extract_company_links_from_page()
+
+                        if not page_hrefs:
+                            self.report_progress(
+                                'search_page_empty',
+                                f'No listing cards found on search page {page_number}',
+                                page_number=page_number,
+                                current_url=self.driver.current_url,
+                                page_title=self.driver.title
+                            )
+                            self.capture_debug_artifact(f"search_page_{page_number}_empty")
+                            self.logger.info(f"No more results found on page {page_number}")
+                            should_stop_search = True
+                            break
+
+                        self.logger.info(f"Found {len(page_hrefs)} company detail links on page {page_number}")
+                        self.report_progress(
+                            'search_page_loaded',
+                            f'Found {len(page_hrefs)} company detail links on search page {page_number}',
+                            page_number=page_number,
+                            current_url=self.driver.current_url,
+                            page_title=self.driver.title
+                        )
+                        for link in page_hrefs:
+                            if link not in company_links:
+                                company_links.append(link)
+                        break
+
+                    except Exception as e:
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            self.logger.warning(f"Error finding elements, retrying ({retry_count}/{max_retries}): {str(e)}")
+                            time.sleep(1)
+                        else:
+                            self.logger.error(f"Failed to extract links after {max_retries} retries: {str(e)}")
+                            break
+
+                new_links = len(company_links) - page_links_before
+                unique_on_page = len(set(page_hrefs))
+                self.logger.info(f"Added {new_links} new unique company links from page {page_number} (found {unique_on_page} unique URLs on this page)")
+                self.report_progress(
+                    'search_page_processed',
+                    f'Processed search page {page_number}: {new_links} new links',
+                    page_number=page_number,
+                    current_url=self.driver.current_url,
+                    found_links=unique_on_page,
+                    new_links=new_links
+                )
+
+                if should_stop_search or unique_on_page == 0:
+                    self.logger.info(
+                        f"Stopping search pagination after page {page_number} because no visible company links were found"
+                    )
+                    break
+
+                # Check if there's a next page
+                try:
+                    # Look for next page button or check if we've reached max pages
+                    if max_pages and page_number >= max_pages:
+                        self.logger.info(f"Reached maximum number of pages ({max_pages})")
+                        break
+
+                    page_number += 1
+
+                except Exception:
+                    break
+
+            except Exception as e:
+                self.capture_debug_artifact(f"search_page_{page_number}_error")
+                self.report_progress(
+                    'search_page_error',
+                    f'Error on search page {page_number}: {str(e)}',
+                    page_number=page_number,
+                    current_url=getattr(self.driver, 'current_url', url)
+                )
+                self.logger.error(f"Error on search page {page_number}: {str(e)}")
+                break
+
+        self.logger.info(f"Collected {len(company_links)} unique company links")
+        return company_links
+
+    def count_images(self):
+        """Count number of images/pictures on the company profile."""
+        try:
+            # Look for gallery or image elements
+            image_selectors = [
+                "img[class*='gallery']",
+                "img[class*='image']",
+                "[data-cy*='image']",
+                "[data-cy*='gallery']",
+                ".DetailGallery_image",
+                "img[src*='local.ch']"
+            ]
+
+            total_images = 0
+            for selector in image_selectors:
+                try:
+                    images = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    # Filter out logo and small icons
+                    valid_images = [img for img in images if img.size['width'] > 100 and img.size['height'] > 100]
+                    total_images = max(total_images, len(valid_images))
+                except:
+                    continue
+
+            return total_images
+        except Exception as e:
+            self.logger.warning(f"Error counting images: {str(e)}")
+            return 0
+
+    def count_reviews(self):
+        """Count number of reviews on the company profile."""
+        try:
+            # Look for "Note moyenne (X avis)" pattern
+            page_text = self.driver.find_element(By.TAG_NAME, 'body').text
+
+            # Pattern: "Note moyenne (4 avis)" or "Durchschnitt (4 Bewertungen)"
+            patterns = [
+                r'Note moyenne \((\d+)\s*avis\)',          # French
+                r'(\d+)\s*avis',                            # French simple
+                r'Durchschnitt \((\d+)\s*Bewertungen\)',   # German
+                r'(\d+)\s*Bewertungen',                     # German simple
+                r'Average \((\d+)\s*reviews\)',             # English
+                r'(\d+)\s*reviews',                         # English simple
+            ]
+
+            for pattern in patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    review_count = int(match.group(1))
+                    self.logger.info(f"  ✓ Reviews: {review_count}")
+                    return review_count
+
+            return 0
+        except Exception as e:
+            self.logger.warning(f"  Error counting reviews: {str(e)}")
+            return 0
+
+    def check_social_media_links(self):
+        """Extract social media links and return them as a dictionary."""
+        social_media_links = {
+            'facebook_url': '',
+            'instagram_url': '',
+            'linkedin_url': '',
+            'twitter_url': '',
+            'youtube_url': ''
+        }
+
+        try:
+            all_links = self.driver.find_elements(By.TAG_NAME, 'a')
+
+            for link in all_links:
+                href = link.get_attribute('href')
+                if href:
+                    href_lower = href.lower()
+
+                    # Extract each social media platform URL
+                    if 'facebook.com' in href_lower and not social_media_links['facebook_url']:
+                        social_media_links['facebook_url'] = href
+                        self.logger.info(f"  ✓ Facebook: {href}")
+                    elif 'instagram.com' in href_lower and not social_media_links['instagram_url']:
+                        social_media_links['instagram_url'] = href
+                        self.logger.info(f"  ✓ Instagram: {href}")
+                    elif 'linkedin.com' in href_lower and not social_media_links['linkedin_url']:
+                        social_media_links['linkedin_url'] = href
+                        self.logger.info(f"  ✓ LinkedIn: {href}")
+                    elif 'twitter.com' in href_lower or 'x.com' in href_lower:
+                        if not social_media_links['twitter_url']:
+                            social_media_links['twitter_url'] = href
+                            self.logger.info(f"  ✓ Twitter/X: {href}")
+                    elif 'youtube.com' in href_lower and not social_media_links['youtube_url']:
+                        social_media_links['youtube_url'] = href
+                        self.logger.info(f"  ✓ YouTube: {href}")
+
+            return social_media_links
+        except Exception as e:
+            self.logger.warning(f"Error checking social media: {str(e)}")
+            return social_media_links
+
+    def check_website_for_localsearch_and_copyright(self, website_url):
+        """
+        Visit company website using Selenium, find legal page, and extract:
+        1. Copyright year (e.g., "© 2023")
+        2. Local Search mention (e.g., "Realizzato da localsearch.ch")
+        3. Zip.ch mention (e.g., "zip.ch" or "myzip.ch")
+        Returns: (copyright_year, has_local_search, has_zip)
+        """
+        if not website_url or website_url == '':
+            return '', False, False
+
+        # Add https:// if missing
+        if not website_url.startswith('http://') and not website_url.startswith('https://'):
+            website_url = 'https://' + website_url
+            self.logger.info(f"    Added https:// prefix: {website_url}")
+
+        copyright_year = ''
+        has_local_search = False
+        has_zip = False
+
+        try:
+            self.logger.info(f"    Visiting website with browser: {website_url}")
+
+            # Use Selenium to visit the website (avoids 403 errors)
+            self.driver.get(website_url)
+
+            # Get page source
+            page_source = self.driver.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
+
+            self.logger.info(f"    Page loaded successfully")
+
+            # CHECK ENTIRE MAIN PAGE FOR ZIP.CH AND LOCAL SEARCH BEFORE NAVIGATING AWAY
+            page_source_lower = page_source.lower()
+
+            # Check for Zip.ch (IMPORTANT: Check both "zip.ch" and "myzip.ch")
+            self.logger.info(f"    Checking main page for Zip.ch...")
+            if 'zip.ch' in page_source_lower or 'myzip.ch' in page_source_lower:
+                has_zip = True
+                self.logger.info(f"    ✓ Zip.ch found in main page!")
+
+            # Check for Local Search
+            self.logger.info(f"    Checking main page for Local Search...")
+            if 'localsearch.ch' in page_source_lower or 'local.ch' in page_source_lower:
+                has_local_search = True
+                self.logger.info(f"    ✓ Local Search found in main page!")
+
+            # Look for legal/note-legali links in footer
+            legal_link_patterns = [
+                'note-legali', 'note legali', 'legal', 'mentions', 'impressum',
+                'mentions-legales', 'mentions légales', 'rechtliches'
+            ]
+
+            legal_url = None
+
+            # Find legal page link
+            for link in soup.find_all('a', href=True):
+                href = link.get('href', '').lower()
+                link_text = link.get_text().lower()
+
+                if any(pattern in href or pattern in link_text for pattern in legal_link_patterns):
+                    legal_url = urljoin(website_url, link['href'])
+                    self.logger.info(f"    Found legal page link: {legal_url}")
+                    break
+
+            # Visit the legal page if found
+            if legal_url:
+                try:
+                    self.logger.info(f"    Navigating to legal page: {legal_url}")
+                    self.driver.get(legal_url)
+
+                    # Get page source
+                    legal_page_source = self.driver.page_source
+                    legal_soup = BeautifulSoup(legal_page_source, 'html.parser')
+
+                    self.logger.info(f"    Legal page loaded successfully")
+
+                    # Parse with BeautifulSoup to get clean text
+                    legal_text = legal_soup.get_text()
+                    legal_text_lower = legal_text.lower()
+                    legal_html_lower = legal_page_source.lower()
+
+                    # Check for Local Search mentions (if not already found)
+                    if not has_local_search:
+                        self.logger.info(f"    Checking for Local Search indicators in legal page...")
+
+                        # Look for specific patterns in HTML
+                        if 'localsearch.ch' in legal_html_lower:
+                            self.logger.info(f"      Found 'localsearch.ch' in HTML")
+
+                            # Check for creation phrases
+                            if any(phrase in legal_text_lower for phrase in [
+                                    'realizzato da',   # Italian: "Created by"
+                                    'realisiert durch', # German: "Created by"
+                                    'réalisé par',     # French: "Created by"
+                                    'erstellt von',    # German: "Created by"
+                                ]):
+                                    has_local_search = True
+                                    self.logger.info(f"    ✓ Local Search found with creation phrase")
+
+                            # Also check for "Eintrag auf local.ch" pattern
+                            elif 'eintrag auf' in legal_text_lower and 'local.ch' in legal_text_lower:
+                                    has_local_search = True
+                                    self.logger.info(f"    ✓ Local Search found: 'Eintrag auf local.ch'")
+
+                            # Check for "iscrizione su local.ch" (Italian)
+                            elif 'iscrizione su' in legal_text_lower and 'local.ch' in legal_text_lower:
+                                    has_local_search = True
+                                    self.logger.info(f"    ✓ Local Search found: 'iscrizione su local.ch'")
+
+                            else:
+                                    # Just finding localsearch.ch link is a strong indicator
+                                    has_local_search = True
+                                    self.logger.info(f"    ✓ Local Search found: localsearch.ch present")
+
+                        if not has_local_search:
+                            self.logger.info(f"    ✗ No Local Search indicators found")
+
+                    # Check for Zip.ch in legal page (if not already found)
+                    if not has_zip:
+                        if 'zip.ch' in legal_html_lower or 'myzip.ch' in legal_html_lower:
+                            has_zip = True
+                            self.logger.info(f"    ✓ Zip.ch found in legal page")
+
+                    # Extract copyright year from legal page
+                    self.logger.info(f"    Searching for copyright year...")
+
+                    # Search in the parsed text (BeautifulSoup removes HTML tags)
+                    # Look for: "© 2019" or "© 2023" patterns
+                    year_patterns = [
+                        r'©\s*(\d{4})',           # © 2019
+                        r'copyright\s*(\d{4})',   # Copyright 2019
+                        r'\(c\)\s*(\d{4})',       # (c) 2019
+                    ]
+
+                    for pattern in year_patterns:
+                        year_match = re.search(pattern, legal_text, re.IGNORECASE)
+                        if year_match:
+                            copyright_year = year_match.group(1)
+                            self.logger.info(f"    ✓ Copyright year: {copyright_year}")
+                            break
+
+                    if not copyright_year:
+                        self.logger.info(f"    ✗ No copyright year found on legal page")
+
+                except Exception as e:
+                    self.logger.warning(f"    Error visiting legal page: {str(e)}")
+
+            # If no legal page found, check main page footer
+            if not copyright_year or not has_local_search:
+                footer = soup.find('footer')
+                if footer:
+                    footer_text = footer.get_text()
+
+                    # Check for copyright year in footer
+                    if not copyright_year:
+                        copyright_match = re.search(r'©\s*(\d{4})', footer_text)
+                        if copyright_match:
+                            copyright_year = copyright_match.group(1)
+                            self.logger.info(f"    ✓ Copyright year from footer: {copyright_year}")
+
+                    # Check for Local Search in footer
+                    if not has_local_search:
+                        if 'localsearch' in footer_text.lower() or 'local.ch' in footer_text.lower():
+                            has_local_search = True
+                            self.logger.info(f"    ✓ Local Search found in footer!")
+
+            return copyright_year, has_local_search, has_zip
+
+        except requests.exceptions.Timeout:
+            self.logger.warning(f"    Timeout accessing website {website_url}")
+            return '', False, False
+        except requests.exceptions.RequestException as e:
+            self.logger.warning(f"    Request error for {website_url}: {str(e)}")
+            return '', False, False
+        except Exception as e:
+            self.logger.warning(f"    Unexpected error checking website {website_url}: {str(e)}")
+            return '', False, False
+
+    def scrape_moneyhouse_persons(self, company_title):
+        """Scrape person/management data from Moneyhouse.ch
+
+        Returns: (persons, moneyhouse_url)
+        """
+        persons = []
+        moneyhouse_url = ''
+        try:
+            self.logger.info(f"  Checking Moneyhouse.ch for: {company_title}")
+
+            # Navigate directly to search results page with company name
+            import urllib.parse
+            encoded_query = urllib.parse.quote(company_title)
+            search_url = f"https://www.moneyhouse.ch/fr/search?q={encoded_query}&status=1&tab=companies"
+
+            self.logger.info(f"    Navigating to: {search_url}")
+            self.driver.get(search_url)
+
+            # Wait for search results to load (language-agnostic selector)
+            try:
+                WebDriverWait(self.driver, 3).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/company/']"))
+                )
+                self.logger.info(f"    Search results loaded")
+            except:
+                self.logger.info(f"    No search results found on Moneyhouse for: {company_title}")
+                return persons, moneyhouse_url
+
+            # Find first company link (language-agnostic)
+            # Look for any link containing '/company/' in the href
+            company_link = None
+            links = self.driver.find_elements(By.CSS_SELECTOR, "a[href*='/company/']")
+
+            self.logger.info(f"    Found {len(links)} company links on search page")
+
+            # Try to find exact match first
+            for link in links:
+                link_text = link.text.strip()
+                if link_text and link_text.lower() == company_title.lower():
+                    company_link = link.get_attribute('href')
+                    self.logger.info(f"    Found exact match: {link_text} -> {company_link}")
+                    break
+
+            # If no exact match, take the first result
+            if not company_link and links:
+                company_link = links[0].get_attribute('href')
+                self.logger.info(f"    Using first result: {links[0].text.strip()} -> {company_link}")
+
+            if not company_link:
+                self.logger.info(f"    No company links found on Moneyhouse for: {company_title}")
+                return persons, moneyhouse_url
+
+            # Navigate to management page
+            # Ensure we have the full URL
+            if not company_link.startswith('http'):
+                company_link = 'https://www.moneyhouse.ch' + company_link
+
+            moneyhouse_url = company_link.split('/management')[0].rstrip('/')
+            management_url = moneyhouse_url + '/management'
+            self.logger.info(f"    Navigating to management page: {management_url}")
+            self.driver.get(management_url)
+
+            # Wait for person table to load
+            try:
+                WebDriverWait(self.driver, 3).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "tbody.person"))
+                )
+            except:
+                self.logger.info(f"    No management data found on Moneyhouse")
+                return persons, moneyhouse_url
+
+            # Scrape person table data
+            # The desktop table has ALL columns including roles and dates
+            # The mobile table only has name and follow columns
+
+            # First, let's see what tables exist
+            all_tables = self.driver.find_elements(By.CSS_SELECTOR, "table")
+            self.logger.info(f"    Total tables on page: {len(all_tables)}")
+
+            for i, table in enumerate(all_tables[:5], 1):  # Check first 5 tables
+                classes = table.get_attribute('class')
+                tbody_count = len(table.find_elements(By.CSS_SELECTOR, "tbody.person"))
+                self.logger.info(f"    Table {i}: classes='{classes}', tbody.person count={tbody_count}")
+
+            # Try the desktop table selector
+            person_rows = self.driver.find_elements(By.CSS_SELECTOR, "table.is-hidden-mobile tbody.person")
+            self.logger.info(f"    Found {len(person_rows)} person rows with selector 'table.is-hidden-mobile tbody.person'")
+
+            # If that didn't work, try without the table prefix
+            if len(person_rows) == 0:
+                self.logger.info(f"    Trying alternate selector...")
+                # The desktop table has class containing "is-hidden-mobile" AND has td.entity-relationdate-sticky
+                all_person_tbody = self.driver.find_elements(By.CSS_SELECTOR, "tbody.person")
+                self.logger.info(f"    Found {len(all_person_tbody)} total tbody.person elements")
+
+                # Filter to only those that have date columns (desktop table)
+                person_rows = []
+                for tbody in all_person_tbody:
+                    has_date_column = len(tbody.find_elements(By.CSS_SELECTOR, "td.entity-relationdate-sticky")) > 0
+                    self.logger.debug(f"    tbody has date column: {has_date_column}")
+                    if has_date_column:
+                        person_rows.append(tbody)
+
+                self.logger.info(f"    Filtered to {len(person_rows)} person rows with date columns (desktop table)")
+
+            for idx, row in enumerate(person_rows, 1):
+                try:
+                    person_data = {}
+
+                    # Get the name link from the row
+                    name_links = row.find_elements(By.CSS_SELECTOR, "a.name-link")
+                    if not name_links:
+                        self.logger.debug(f"    Row {idx}: No name link found, skipping")
+                        continue
+
+                    # Extract name from a.name-link
+                    name_elem = name_links[0]
+                    person_data['name'] = name_elem.text.strip()
+                    person_data['profile_url'] = name_elem.get_attribute('href')
+
+                    if not person_data['name']:
+                        # Try getting text content via innerHTML or textContent
+                        try:
+                            text_content = self.driver.execute_script("return arguments[0].textContent;", name_elem)
+                            person_data['name'] = text_content.strip() if text_content else ''
+                            self.logger.debug(f"    Row {idx}: Got name via textContent: '{person_data['name']}'")
+                        except:
+                            pass
+
+                    if not person_data['name']:
+                        self.logger.debug(f"    Row {idx}: Empty name after all attempts, skipping")
+                        # Log the HTML for debugging
+                        try:
+                            elem_html = name_elem.get_attribute('outerHTML')
+                            self.logger.debug(f"    Row {idx} name element HTML: {elem_html[:200]}")
+                        except:
+                            pass
+                        continue
+
+                    # Extract roles from td.entity-relation-sticky span.role.bean
+                    # Look within the row's tr element, not the tbody
+                    tr_elem = row.find_element(By.TAG_NAME, "tr")
+
+                    # Since we already verified the name_elem is displayed, this entire tr is visible
+                    # No need to check is_displayed() again for each element within this row
+
+                    # Get all role spans (there can be multiple like "Président" and "Signature individuelle")
+                    role_spans = tr_elem.find_elements(By.CSS_SELECTOR, "td.entity-relation-sticky span.role.bean")
+                    roles = []
+                    for span in role_spans:
+                        text = span.text.strip()
+                        if not text:
+                            # Try textContent
+                            try:
+                                text = self.driver.execute_script("return arguments[0].textContent;", span).strip()
+                            except:
+                                pass
+                        if text:
+                            roles.append(text)
+                    person_data['role'] = ', '.join(roles) if roles else ''
+                    self.logger.debug(f"    Row {idx}: Extracted roles: {person_data['role']}")
+
+                    # Extract since date from td.entity-relationdate-sticky span
+                    try:
+                        date_span = tr_elem.find_element(By.CSS_SELECTOR, "td.entity-relationdate-sticky span")
+                        date_text = date_span.text.strip()
+                        if not date_text:
+                            # Try textContent
+                            date_text = self.driver.execute_script("return arguments[0].textContent;", date_span).strip()
+                        # Remove language-specific prefixes
+                        date_text = date_text.replace('depuis ', '').replace('seit ', '').replace('dal ', '')
+                        person_data['since'] = date_text
+                        self.logger.debug(f"    Row {idx}: Found date: {date_text}")
+                    except Exception as e:
+                        person_data['since'] = ''
+                        self.logger.debug(f"    Row {idx}: Could not find date: {e}")
+
+                    # Extract LinkedIn link if exists from a.icon-linkedIn
+                    try:
+                        linkedin_link = tr_elem.find_element(By.CSS_SELECTOR, "a.icon-linkedIn.linkedin-link")
+                        person_data['linkedin'] = linkedin_link.get_attribute('href')
+                        self.logger.debug(f"    Row {idx}: Found LinkedIn: {person_data['linkedin']}")
+                    except Exception as e:
+                        person_data['linkedin'] = ''
+                        self.logger.debug(f"    Row {idx}: No LinkedIn link found: {e}")
+
+                    persons.append(person_data)
+                    self.logger.info(f"    Found person: {person_data['name']} - {person_data['role']} (since {person_data['since']})")
+
+                except Exception as e:
+                    self.logger.warning(f"    Error extracting person data from row {idx}: {e}")
+                    # Log the HTML for debugging
+                    try:
+                        row_html = row.get_attribute('outerHTML')
+                        self.logger.debug(f"    Row {idx} HTML: {row_html[:500]}...")  # First 500 chars
+                    except:
+                        pass
+                    continue
+
+            self.logger.info(f"    Total persons found: {len(persons)}")
+
+            # If no persons found, save HTML to file for debugging
+            if len(persons) == 0:
+                try:
+                    page_source = self.driver.page_source
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"moneyhouse_debug_{timestamp}.html"
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        f.write(page_source)
+                    self.logger.warning(f"    No persons found! HTML saved to {filename} for debugging")
+                except Exception as e:
+                    self.logger.warning(f"    Could not save HTML debug file: {e}")
+
+        except Exception as e:
+            self.logger.error(f"  Error scraping Moneyhouse: {e}")
+            # Save HTML to file for debugging
+            try:
+                if self.driver:
+                    page_source = self.driver.page_source
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"moneyhouse_error_{timestamp}.html"
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        f.write(page_source)
+                    self.logger.error(f"  Error occurred! HTML saved to {filename} for debugging")
+            except:
+                pass
+
+        return persons, moneyhouse_url
+
+    def empty_gmb_profile(self, disabled=False):
+        """Default Google Business Profile fields."""
+        na = 'N/A' if disabled else ''
+        return {
+            'has_gmb': 'N/A' if disabled else False,
+            'gmb_place_id': na,
+            'gmb_name': na,
+            'gmb_url': na,
+            'gmb_rating': na,
+            'gmb_review_count': na if disabled else None,
+            'gmb_formatted_address': na,
+        }
+
+    def _normalize_business_name(self, name):
+        text = (name or '').lower()
+        text = re.sub(r'[^\w\s]', ' ', text, flags=re.UNICODE)
+        return re.sub(r'\s+', ' ', text).strip()
+
+    def _gmb_names_match(self, company_title, place_name):
+        """Loose name match so we don't attach the wrong Google listing."""
+        left = self._normalize_business_name(company_title)
+        right = self._normalize_business_name(place_name)
+        if not left or not right:
+            return False
+        if left == right or left in right or right in left:
+            return True
+
+        left_tokens = {token for token in left.split() if len(token) > 2}
+        right_tokens = {token for token in right.split() if len(token) > 2}
+        if not left_tokens:
+            return False
+        overlap = len(left_tokens & right_tokens) / len(left_tokens)
+        return overlap >= 0.6
+
+    def fetch_google_business_profile(self, company_title, street='', zipcode='', city=''):
+        """Resolve Google Business Profile via Places API (New) Text Search.
+
+        Returns URL, rating, and review count for the best matching place in Switzerland.
+        """
+        result = self.empty_gmb_profile(disabled=False)
+        if not company_title:
+            return result
+
+        if not self.google_places_enabled:
+            self.logger.warning("  GOOGLE_PLACES_API_KEY not set — skipping GMB lookup")
+            return result
+
+        query_parts = [company_title]
+        if street:
+            query_parts.append(street)
+        if zipcode:
+            query_parts.append(str(zipcode))
+        if city:
+            query_parts.append(city)
+        text_query = ', '.join(query_parts)
+
+        try:
+            self.logger.info(f"  Looking up Google Business Profile: {text_query}")
+            response = self._places_session.post(
+                'https://places.googleapis.com/v1/places:searchText',
+                headers={
+                    'Content-Type': 'application/json',
+                    'X-Goog-Api-Key': self.google_places_api_key,
+                    'X-Goog-FieldMask': (
+                        'places.id,places.displayName,places.formattedAddress,'
+                        'places.rating,places.userRatingCount,places.googleMapsUri'
+                    ),
+                },
+                json={
+                    'textQuery': text_query,
+                    'regionCode': 'CH',
+                    'languageCode': 'en',
+                    'pageSize': 5,
+                },
+                timeout=30,
+            )
+
+            if response.status_code != 200:
+                self.logger.error(
+                    f"  Places API error {response.status_code}: {response.text[:300]}"
+                )
+                return result
+
+            places = response.json().get('places') or []
+            if not places:
+                self.logger.info("  ✗ No Google Business Profile found")
+                return result
+
+            name_matches = []
+            for place in places:
+                place_name = (place.get('displayName') or {}).get('text') or ''
+                if self._gmb_names_match(company_title, place_name):
+                    name_matches.append(place)
+
+            if not name_matches:
+                self.logger.info("  ✗ No sufficiently matching Google Business Profile")
+                return result
+
+            best_place = name_matches[0]
+            if zipcode:
+                for place in name_matches:
+                    if str(zipcode) in (place.get('formattedAddress') or ''):
+                        best_place = place
+                        break
+
+            display_name = (best_place.get('displayName') or {}).get('text') or ''
+            rating = best_place.get('rating')
+            review_count = best_place.get('userRatingCount')
+            maps_url = best_place.get('googleMapsUri') or ''
+
+            result.update({
+                'has_gmb': True,
+                'gmb_place_id': best_place.get('id') or '',
+                'gmb_name': display_name,
+                'gmb_url': maps_url,
+                'gmb_rating': rating if rating is not None else '',
+                'gmb_review_count': review_count if review_count is not None else 0,
+                'gmb_formatted_address': best_place.get('formattedAddress') or '',
+            })
+            self.logger.info(
+                f"  ✓ GMB: {display_name} | rating={result['gmb_rating']} "
+                f"| reviews={result['gmb_review_count']} | {maps_url}"
+            )
+            return result
+
+        except Exception as e:
+            self.logger.error(f"  Error fetching Google Business Profile: {e}")
+            return result
+
+    def check_google_presence(self, company_title, site_domain):
+        """Check if company has presence on a specific site via DuckDuckGo search
+
+        Args:
+            company_title: Company name to search
+            site_domain: Domain to check (e.g., 'architectes.ch')
+
+        Returns: Boolean indicating presence
+        """
+        try:
+            self.logger.info(f"  Checking {site_domain} presence for: {company_title}")
+
+            # Use DuckDuckGo search with site: operator
+            search_query = f'{company_title} site:{site_domain}'
+            import urllib.parse
+            encoded_query = urllib.parse.quote(search_query)
+            ddg_url = f"https://duckduckgo.com/?q={encoded_query}"
+
+            self.logger.info(f"    Searching DuckDuckGo: {ddg_url}")
+            self.driver.get(ddg_url)
+
+            # DuckDuckGo uses different selectors - try multiple approaches
+            # Try to find any search results
+            result_selectors = [
+                "article[data-testid='result']",  # Modern DDG
+                "div.result",  # Classic DDG
+                "div[data-testid='result']",  # Alternative
+                "li[data-testid='result']",  # List item variant
+                "a.result__a",  # Link variant
+            ]
+
+            results_found = False
+            matching_results = []
+
+            for selector in result_selectors:
+                try:
+                    results = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    if results:
+                        self.logger.info(f"    Found {len(results)} results using selector: {selector}")
+                        results_found = True
+
+                        # Check first 5 results for the domain
+                        for idx, result in enumerate(results[:5], 1):
+                            try:
+                                # Get all links within this result
+                                links = result.find_elements(By.TAG_NAME, "a")
+                                for link in links:
+                                    href = link.get_attribute('href')
+                                    if href and site_domain.lower() in href.lower():
+                                        # Make sure it's not a DDG internal link
+                                        if 'duckduckgo.com' not in href.lower():
+                                            self.logger.info(f"    ✓ Found on {site_domain}: {href}")
+                                            return True
+                            except:
+                                continue
+
+                        break  # Found results with this selector, no need to try others
+                except:
+                    continue
+
+            # If no results found with standard selectors, try getting all links on page
+            if not results_found:
+                self.logger.info(f"    No standard results found, checking all links...")
+                all_links = self.driver.find_elements(By.TAG_NAME, "a")
+
+                for link in all_links:
+                    try:
+                        href = link.get_attribute('href')
+                        if href and site_domain.lower() in href.lower():
+                            # Exclude DDG's own links
+                            if not any(x in href.lower() for x in ['duckduckgo.com', 'duck.co', 'privacy']):
+                                self.logger.info(f"    ✓ Found on {site_domain}: {href}")
+                                return True
+                    except:
+                        continue
+
+            self.logger.info(f"    ✗ No results found on {site_domain}")
+            return False
+
+        except Exception as e:
+            self.logger.error(f"  Error checking {site_domain} presence: {e}")
+            # Save HTML for debugging
+            try:
+                page_source = self.driver.page_source
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"ddg_debug_{site_domain}_{timestamp}.html"
+                with open(filename, 'w', encoding='utf-8') as f:
+                    f.write(page_source)
+                self.logger.info(f"    Debug HTML saved to {filename}")
+            except:
+                pass
+            return False
+
+    def calculate_credibility_score(self, data):
+        """
+        Calculate credibility score based on profile completeness.
+        Total: 100 points
+        """
+        score = 0
+
+        # Description (15 points)
+        if data['description'] and len(data['description']) > 100:
+            score += 15
+        elif data['description']:
+            score += 8
+
+        # Pictures (15 points)
+        if data['picture_count'] >= 5:
+            score += 15
+        elif data['picture_count'] >= 3:
+            score += 10
+        elif data['picture_count'] >= 1:
+            score += 5
+
+        # Reviews (15 points)
+        if data['review_count'] >= 10:
+            score += 15
+        elif data['review_count'] >= 5:
+            score += 10
+        elif data['review_count'] >= 1:
+            score += 5
+
+        # Contact info (15 points base) + mobile scored signal (§4)
+        if data.get('phone_numbers') or data.get('landline_numbers') or data.get('mobile_numbers'):
+            score += 5
+        if data.get('email'):
+            score += 5
+        if data.get('website'):
+            score += 5
+        if data.get('has_mobile') or data.get('mobile_numbers'):
+            score += 5  # Mobile (076/077/078/079) is an explicit scored signal
+
+        # Social media (10 points)
+        if data['has_social_media']:
+            score += 10
+
+        # Address (10 points)
+        if data['street'] and data['zipcode'] and data['city']:
+            score += 10
+
+        # Local Search Detection (10 points) - NEGATIVE INDICATOR
+        # Companies using Local Search are likely in contracts, less valuable leads
+        if data['has_local_search']:
+            score -= 10  # Penalty for being a Local Search customer
+
+        # Banner/display ads on Local.ch (§3.2) — yellow/robot signal
+        if data.get('has_localch_banner_ads') is True:
+            score -= 10
+
+        # Copyright Year (10 points) - NEGATIVE INDICATOR for recent years
+        # Recent copyright year (2024-2026) = likely in new contract
+        if data['copyright_year']:
+            try:
+                year = int(data['copyright_year'])
+                current_year = datetime.now().year
+
+                if year >= current_year - 1:  # 2025 or 2026 (very recent)
+                    score -= 10  # Strong penalty - definitely in contract
+                elif year >= current_year - 3:  # 2023-2024 (recent)
+                    score -= 5   # Moderate penalty - likely in contract
+                # Older years (before 2023) get no penalty - contract likely expired
+            except:
+                pass
+
+        # Ensure score stays within 0-100 range
+        score = max(0, min(100, score))
+
+        return score
+
+    def clean_text(self, text):
+        """Clean and format text."""
+        if not text:
+            return ''
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'<[^>]+>', '', text)
+        return text.strip()
+
+    def parse_address(self, address_text):
+        """Parse address into components."""
+        if not address_text:
+            return '', '', '', ''
+
+        address_text = address_text.replace('&nbsp;', ' ')
+        address_text = re.sub(r'\s+', ' ', address_text.strip())
+
+        pattern = r'(.*?)\s*,?\s*(\d{4})\s*(.*?)(?:\s*\((.*?)\))?$'
+        match = re.match(pattern, address_text)
+
+        if match:
+            street = match.group(1).strip()
+            zipcode = match.group(2)
+            city = match.group(3).strip()
+            kanton = match.group(4) or ''
+            return street, zipcode, city, kanton.strip()
+
+        return address_text, '', '', ''
+    
+    def normalize_swiss_phone(self, raw):
+        if not raw:
+            return None
+        
+        cleaned = re.sub(r"[^\d+]", "", raw.strip())
+
+        if cleaned.startswith("00"):
+            cleaned = "+" + cleaned[2:]
+
+        if re.fullmatch(r"\+41\d{9}", cleaned):
+            return cleaned
+
+        if re.fullmatch(r"0\d{9}", cleaned):
+            return "+41" + cleaned[1:]
+
+        if re.fullmatch(r"\d{9}", cleaned):
+            return "+41" + cleaned
+
+        if re.fullmatch(r"41\d{9}", cleaned):
+            return "+" + cleaned
+        
+        return None
+
+    @staticmethod
+    def is_swiss_mobile(normalized_phone):
+        """Swiss mobile ranges 076/077/078/079 → +4176/+4177/+4178/+4179."""
+        if not normalized_phone:
+            return False
+        return bool(re.match(r'^\+417[6-9]\d{7}$', normalized_phone))
+
+    def normalize_phone_list(self, raw):
+        """Normalize phones and split Swiss mobiles (076/077/078/079) from landlines.
+
+        Returns:
+            dict with phone_numbers, mobile_numbers, landline_numbers, has_mobile
+        """
+        empty = {
+            'phone_numbers': '',
+            'mobile_numbers': '',
+            'landline_numbers': '',
+            'has_mobile': False,
+        }
+        if not raw:
+            return empty
+
+        parts = re.split(r"[,;/]", raw)
+        all_numbers = []
+        mobiles = []
+        landlines = []
+        seen = set()
+
+        for part in parts:
+            value = self.normalize_swiss_phone(part)
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            all_numbers.append(value)
+            if self.is_swiss_mobile(value):
+                mobiles.append(value)
+            else:
+                landlines.append(value)
+
+        return {
+            'phone_numbers': ', '.join(all_numbers),
+            'mobile_numbers': ', '.join(mobiles),
+            'landline_numbers': ', '.join(landlines),
+            'has_mobile': bool(mobiles),
+        }
+
+    def detect_localch_banner_ads(self):
+        """Detect banner/display ads on the current Local.ch page (detail or search).
+
+        Only Local.ch platform ads are auto-detected. Off-platform web ads stay manual.
+        """
+        result = {
+            'has_localch_banner_ads': False,
+            'localch_banner_ad_signals': [],
+            'has_web_banner_ads': 'N/A',  # manual / elsewhere-on-web — not auto-scraped yet
+        }
+        if not self.driver:
+            return result
+
+        signals = []
+        try:
+            # 1) Explicit Swiss/FR/EN ad labels used on local.ch listings & creatives
+            label_xpath = (
+                "//*[contains(translate(normalize-space(.), "
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÄÉÈÊËÎÏÔÙÛÜÇ', "
+                "'abcdefghijklmnopqrstuvwxyzàâäéèêëîïôùûüç'), 'anzeige') "
+                "or contains(translate(normalize-space(.), "
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÄÉÈÊËÎÏÔÙÛÜÇ', "
+                "'abcdefghijklmnopqrstuvwxyzàâäéèêëîïôùûüç'), 'publicité') "
+                "or contains(translate(normalize-space(.), "
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+                "'abcdefghijklmnopqrstuvwxyz'), 'advertisement') "
+                "or contains(translate(normalize-space(.), "
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+                "'abcdefghijklmnopqrstuvwxyz'), 'sponsored')]"
+            )
+            try:
+                label_nodes = self.driver.find_elements(By.XPATH, label_xpath)
+                for node in label_nodes[:8]:
+                    text = (node.text or '').strip()
+                    if text and len(text) <= 40:
+                        signals.append(f'label:{text}')
+                        break
+            except Exception:
+                pass
+
+            # 2) Ad iframes / creatives commonly used on local.ch
+            ad_src_bits = (
+                'doubleclick', 'googlesyndication', 'googleads', 'adservice',
+                'pagead', 'adsystem', 'adnxs', 'criteo', 'pubmatic', 'adform',
+                'taboola', 'outbrain', 'smartadserver', 'localsearch',
+                'werbung', 'banner', '/ads/', 'ad-iframe', 'adiframe'
+            )
+            try:
+                for iframe in self.driver.find_elements(By.CSS_SELECTOR, 'iframe[src]'):
+                    src = (iframe.get_attribute('src') or '').lower()
+                    if any(bit in src for bit in ad_src_bits):
+                        signals.append('iframe:ad_network')
+                        break
+            except Exception:
+                pass
+
+            # 3) DOM hooks: ids/classes/data-testid that look like ad slots
+            ad_dom_selectors = [
+                '[data-testid*="ad"]',
+                '[data-testid*="Ad"]',
+                '[data-testid*="banner"]',
+                '[data-testid*="Banner"]',
+                '[data-testid*="sponsor"]',
+                '[class*="AdSlot"]',
+                '[class*="ad-slot"]',
+                '[class*="adSlot"]',
+                '[class*="BannerAd"]',
+                '[class*="banner-ad"]',
+                '[id*="google_ads"]',
+                '[id*="div-gpt-ad"]',
+                'ins.adsbygoogle',
+            ]
+            for selector in ad_dom_selectors:
+                try:
+                    hits = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    if hits:
+                        signals.append(f'dom:{selector}')
+                        break
+                except Exception:
+                    continue
+
+            # 4) Scripts that load display ad stacks
+            try:
+                page_html = (self.driver.page_source or '').lower()
+                for marker in (
+                    'googletag', 'gpt.js', 'adsbygoogle', 'doubleclick.net',
+                    'googlesyndication.com', 'localbanner', 'digitalplus'
+                ):
+                    if marker in page_html:
+                        signals.append(f'script:{marker}')
+                        break
+            except Exception:
+                pass
+
+            # Deduplicate while preserving order
+            unique_signals = []
+            for signal in signals:
+                if signal not in unique_signals:
+                    unique_signals.append(signal)
+
+            result['localch_banner_ad_signals'] = unique_signals
+            result['has_localch_banner_ads'] = bool(unique_signals)
+            if result['has_localch_banner_ads']:
+                self.logger.info(
+                    f"  ✓ Local.ch banner/display ads detected: {', '.join(unique_signals[:3])}"
+                )
+            else:
+                self.logger.info("  ✗ No Local.ch banner/display ads detected")
+        except Exception as e:
+            self.logger.warning(f"  Error detecting Local.ch banner ads: {e}")
+
+        return result
+
+    def detect_independent(self, title):
+        if not title or not title.strip():
+            return None
+        classification = self.classify_title_with_openai(title)
+        return classification.get('is_independent') if classification else None
+
+    def normalize_title_for_cache(self, title):
+        normalized = re.sub(r'\s+', ' ', (title or '').casefold()).strip()
+        return normalized
+
+    def get_cached_title_classification(self, title):
+        if self.classifications_collection is None:
+            return None
+
+        normalized_title = self.normalize_title_for_cache(title)
+        if not normalized_title:
+            return None
+
+        cached = self.classifications_collection.find_one({'normalized_title': normalized_title})
+        if not cached:
+            return None
+        if cached.get('classifier_version') != LEGAL_FORM_CLASSIFIER_VERSION:
+            return None
+        return cached
+
+    def save_title_classification(self, title, classification):
+        if self.classifications_collection is None:
+            return
+
+        normalized_title = self.normalize_title_for_cache(title)
+        if not normalized_title:
+            return
+
+        document = {
+            'normalized_title': normalized_title,
+            'original_title': title,
+            'is_independent': classification.get('is_independent'),
+            'classification': classification.get('classification'),
+            'detected_legal_form': classification.get('detected_legal_form'),
+            'reason': classification.get('reason'),
+            'confidence': classification.get('confidence'),
+            'source': classification.get('source', 'openai_legal_form'),
+            'model': self.openai_model,
+            'classifier_version': LEGAL_FORM_CLASSIFIER_VERSION,
+            'updated_at': datetime.utcnow(),
+        }
+
+        self.classifications_collection.update_one(
+            {'normalized_title': normalized_title},
+            {'$set': document, '$setOnInsert': {'created_at': datetime.utcnow()}},
+            upsert=True
+        )
+
+    def classify_title_with_openai(self, title):
+        cached = self.get_cached_title_classification(title)
+        if cached:
+            return {
+                'is_independent': cached.get('is_independent'),
+                'classification': cached.get('classification'),
+                'detected_legal_form': cached.get('detected_legal_form'),
+                'reason': cached.get('reason'),
+                'confidence': cached.get('confidence'),
+                'source': cached.get('source', 'openai_cache'),
+            }
+
+        if not self.openai_enabled:
+            self.logger.warning("OPENAI_API_KEY is not configured; independent classification is disabled")
+            return None
+
+        legal_forms_text = ", ".join(SWISS_LEGAL_FORMS)
+        system_prompt = (
+            "You detect legal forms in Swiss company titles. "
+            "Return structured JSON only. "
+            "Classify based only on the title string, without inventing facts. "
+            "Your only task is to detect whether the title explicitly contains or directly expresses "
+            "one of these legal forms, including obvious case or accent variants: "
+            f"{legal_forms_text}. "
+            "Do not infer from clinic wording, brand names, doctor names, plurals, or business style. "
+            "If a listed legal form is explicitly present, return 'has_legal_form'. "
+            "If no listed legal form is explicitly present, return 'no_legal_form'. "
+            "Never return an ambiguous answer."
+        )
+        user_prompt = (
+            f'Check this Swiss company title: "{title}". '
+            "Answer only based on whether one of the allowed legal forms is explicitly present."
+        )
+        payload = {
+            'model': self.openai_model,
+            'messages': [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_prompt}
+            ],
+            'response_format': {
+                'type': 'json_schema',
+                'json_schema': {
+                    'name': 'company_title_classification',
+                    'strict': True,
+                    'schema': {
+                        'type': 'object',
+                        'additionalProperties': False,
+                        'properties': {
+                            'classification': {
+                                'type': 'string',
+                                'enum': ['has_legal_form', 'no_legal_form']
+                            },
+                            'detected_legal_form': {
+                                'type': ['string', 'null']
+                            },
+                            'confidence': {
+                                'type': 'number'
+                            },
+                            'reason': {
+                                'type': 'string'
+                            }
+                        },
+                        'required': ['classification', 'detected_legal_form', 'confidence', 'reason']
+                    }
+                }
+            }
+        }
+
+        try:
+            response = self._openai_session.post(
+                'https://api.openai.com/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {self.openai_api_key}',
+                    'Content-Type': 'application/json',
+                },
+                json=payload,
+                timeout=self.openai_timeout
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = data['choices'][0]['message']['content']
+            parsed = json.loads(content)
+            classification_value = parsed.get('classification')
+            has_legal_form = classification_value == 'has_legal_form'
+
+            result = {
+                'is_independent': not has_legal_form,
+                'classification': classification_value,
+                'detected_legal_form': parsed.get('detected_legal_form'),
+                'reason': parsed.get('reason'),
+                'confidence': parsed.get('confidence'),
+                'source': 'openai_legal_form',
+            }
+            self.save_title_classification(title, result)
+            return result
+        except Exception as e:
+            self.logger.warning(f"OpenAI title classification failed for '{title}': {e}")
+            return None
+
+    def should_skip_independent(self, title):
+        is_independent = self.detect_independent(title)
+        return is_independent is True and not self.include_independents
+
+
+    def derive_canton_from_zip(self, zipcode):
+        if not zipcode:
+            return ""
+        
+        zipcode = str(zipcode).strip()
+
+        if not re.fullmatch(r"\d{4}", zipcode):
+            return ""
+        
+        zip_int = int(zipcode)
+
+        canton_ranges = [
+          ((1000, 1299), "VD"),
+          ((1200, 1299), "GE"),
+          ((1400, 1499), "VD"),
+          ((1500, 1799), "FR"),
+          ((1800, 1899), "VD"),
+          ((1900, 1999), "VS"),
+          ((2000, 2999), "NE"),
+          ((2300, 2399), "JU"),
+          ((2500, 2999), "BE"),
+          ((3000, 3999), "BE"),
+          ((4000, 4699), "BS/BL"),
+          ((5000, 5799), "AG"),
+          ((6000, 6499), "LU"),
+          ((6500, 6999), "TI"),
+          ((7000, 7999), "GR"),
+          ((8000, 8999), "ZH"),
+          ((9000, 9999), "SG"),
+        ]
+
+        for (start, end), canton in canton_ranges:
+            if start <= zip_int <= end:
+                return canton
+            
+        return ""
+
+
+    def handle_cookie_consent(self):
+        """Handle cookie consent popup — only acts once per scraper session."""
+        if self.cookie_consent_handled:
+            return False
+
+        try:
+            # Try to click "Tout refuser" (Refuse All) to avoid tracking
+            try:
+                refuse_button = WebDriverWait(self.driver, 1).until(
+                    EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Tout refuser')]"))
+                )
+                refuse_button.click()
+                self.logger.info("Clicked 'Tout refuser' on cookie consent")
+                self.cookie_consent_handled = True
+                return True
+            except:
+                pass
+
+            # If that fails, try to click "J'accepte" (Accept)
+            try:
+                accept_button = WebDriverWait(self.driver, 0.5).until(
+                    EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'accepte')]"))
+                )
+                accept_button.click()
+                self.logger.info("Clicked 'J'accepte' on cookie consent")
+                self.cookie_consent_handled = True
+                return True
+            except:
+                pass
+
+            # No popup found — mark as handled so we don't check again
+            self.cookie_consent_handled = True
+            return False
+
+        except Exception as e:
+            self.logger.debug(f"No cookie consent popup found or error handling it: {str(e)}")
+            self.cookie_consent_handled = True
+            return False
+
+    @retry_on_exception(retries=3, delay=5)
+    def scrape_detail_page(self, url):
+        """Scrape comprehensive data from a company detail page."""
+        try:
+            self.report_progress(
+                'detail_page_loading',
+                f'Loading company detail page',
+                current_url=url
+            )
+            self.driver.get(url)
+            self.capture_debug_artifact("detail_page_loaded")
+
+            # Handle cookie consent popup first
+            self.handle_cookie_consent()
+
+            # Wait for page to load
+            try:
+                WebDriverWait(self.driver, 5).until(
+                    EC.any_of(
+                        EC.presence_of_element_located((By.CLASS_NAME, "detail_detail__SXBfi")),
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "[data-cy='header-title']")),
+                        EC.presence_of_element_located((By.CLASS_NAME, "DetailMapPreview_addressValue__pQROv"))
+                    )
+                )
+            except TimeoutException:
+                self.capture_debug_artifact("detail_page_timeout")
+                self.logger.warning(f"Page load timeout for {url}")
+
+        except Exception as e:
+            self.logger.error(f"Error loading page {url}: {str(e)}")
+            raise
+
+        # Initialize data structure
+        detail_data = {
+            'url': url,
+            'keyword': self.keyword,
+            'title': '',
+            'street': '',
+            'zipcode': '',
+            'city': '',
+            'canton': '',
+            'address_enriched': False,
+            'phone_numbers': '',
+            'phone_numbers_raw': '',
+            'mobile_numbers': '',
+            'landline_numbers': '',
+            'has_mobile': False,
+            'email': '',
+            'website': '',
+            'description': '',
+            'picture_count': 0,
+            'review_count': 0,
+            'average_rating': '',
+            'has_social_media': False,
+            'facebook_url': '',
+            'instagram_url': '',
+            'linkedin_url': '',
+            'twitter_url': '',
+            'youtube_url': '',
+            'copyright_year': '',
+            'has_local_search': False,
+            'has_localch_banner_ads': False,
+            'localch_banner_ad_signals': [],
+            'has_web_banner_ads': 'N/A',
+            # Opening hours (7 days)
+            'hours_monday': '',
+            'hours_tuesday': '',
+            'hours_wednesday': '',
+            'hours_thursday': '',
+            'hours_friday': '',
+            'hours_saturday': '',
+            'hours_sunday': '',
+            'credibility_score': 0,
+            # New fields from detail sections
+            'languages': [],
+            'forms_of_contact': [],
+            'location_attributes': [],
+            'categories': [],
+            'is_independent': None,
+            'independent_classification': '',
+            'independent_classification_reason': '',
+            'independent_classification_source': '',
+            # Google Business Profile (Places API)
+            'has_gmb': False,
+            'gmb_place_id': '',
+            'gmb_name': '',
+            'gmb_url': '',
+            'gmb_rating': '',
+            'gmb_review_count': None,
+            'gmb_formatted_address': '',
+            'moneyhouse_url': '',
+        }
+
+        # Get title
+        try:
+            title = self.driver.find_element(By.CSS_SELECTOR, "[data-cy='header-title']")
+            detail_data['title'] = title.text.strip()
+            self.logger.info(f"  ✓ Title: {detail_data['title']}")
+            classification = self.classify_title_with_openai(detail_data['title'])
+            if classification:
+                detail_data['is_independent'] = classification.get('is_independent')
+                detail_data['independent_classification'] = classification.get('classification') or ''
+                detail_data['independent_classification_reason'] = classification.get('reason') or ''
+                detail_data['independent_classification_source'] = classification.get('source') or ''
+            if self.should_skip_independent(detail_data['title']):
+                self.logger.info("  Skipping independent company due to scrape settings")
+                self.report_progress(
+                    'detail_page_skipped',
+                    'Skipped independent company',
+                    current_url=url,
+                    page_title=detail_data['title']
+                )
+                return None
+        except NoSuchElementException:
+            self.logger.warning(f"  ✗ Title not found")
+
+        # Disable implicit wait during data extraction — find_elements returns
+        # immediately with an empty list instead of hanging for 10s per miss.
+        self.driver.implicitly_wait(0)
+
+        # Get all bordered info boxes (new Local.ch layout)
+        info_boxes = self.driver.find_elements(By.CSS_SELECTOR, ".l\\:col.l\\:border")
+        self.logger.info(f"  Found {len(info_boxes)} info boxes")
+
+        # Process each info box
+        for box in info_boxes:
+            box_text = box.text.strip()
+            self.logger.info(f"  Processing box with text starting: {box_text[:50]}...")
+
+            # Check if this box contains address
+            if 'Adresse:' in box_text or 'Address:' in box_text:
+                try:
+                    # Extract address after "Adresse:" label
+                    lines = box_text.split('\n')
+                    for i, line in enumerate(lines):
+                        if 'Adresse:' in line or 'Address:' in line:
+                            if i + 1 < len(lines):
+                                address_text = lines[i + 1].strip()
+                                street, zipcode, city, canton = self.parse_address(address_text)
+                                if not canton:
+                                    canton = self.derive_canton_from_zip(zipcode)
+                                detail_data.update({
+                                    'street': street,
+                                    'zipcode': zipcode,
+                                    'city': city,
+                                    'canton': canton,
+                                    'address_enriched': bool(street and zipcode and city and canton)
+                                })
+                                self.logger.info(f"  ✓ Address: {street}, {zipcode} {city}")
+                                break
+                except Exception as e:
+                    self.logger.warning(f"  Error parsing address: {str(e)}")
+
+            # Check if this box contains contact info (phone, email, website)
+            if any(keyword in box_text for keyword in ['Téléphone:', 'E-mail:', 'Site web:', 'Portable:', 'WhatsApp:']):
+                try:
+                    lines = box_text.split('\n')
+                    for i, line in enumerate(lines):
+                        line_lower = line.lower()
+
+                        # Get phone number
+                        if any(keyword in line for keyword in ['Téléphone:', 'Portable:', 'Phone:', 'Mobile:']):
+                            # Collect all phone numbers after this label (skip labels like "Hauptnummer")
+                            collected_phones = []
+                            for j in range(i + 1, len(lines)):
+                                next_line = lines[j].strip()
+
+                                # Stop if we hit another label
+                                if any(label in next_line for label in ['E-mail:', 'Site web:', 'Adresse:', 'Réseaux sociaux:']):
+                                    break
+
+                                # Skip sub-labels like "Hauptnummer", "Markus Bucher", etc (text without numbers)
+                                # Only keep lines that contain actual phone numbers
+                                if re.search(r'\d{2,}', next_line):  # At least 2 digits
+                                    collected_phones.append(next_line)
+
+                            if collected_phones:
+                                phone_str = ', '.join(collected_phones)
+                                if not detail_data['phone_numbers_raw']:
+                                    detail_data['phone_numbers_raw'] = phone_str
+                                else:
+                                    detail_data['phone_numbers_raw'] += f", {phone_str}"
+                                self.logger.info(f"  ✓ Phone: {phone_str}")
+
+                        # Get email
+                        elif 'e-mail:' in line_lower or 'email:' in line_lower:
+                            if i + 1 < len(lines):
+                                detail_data['email'] = lines[i + 1].strip()
+                                self.logger.info(f"  ✓ Email: {detail_data['email']}")
+
+                        # Get website
+                        elif 'site web:' in line_lower or 'website:' in line_lower:
+                            if i + 1 < len(lines):
+                                detail_data['website'] = lines[i + 1].strip()
+                                self.logger.info(f"  ✓ Website: {detail_data['website']}")
+
+                except Exception as e:
+                    self.logger.warning(f"  Error parsing contact info: {str(e)}")
+
+            # Check if this box contains description (class "gV")
+            if 'gV' in box.get_attribute('class'):
+                try:
+                    detail_data['description'] = self.clean_text(box_text)
+                    self.logger.info(f"  ✓ Description: {len(detail_data['description'])} chars")
+                except Exception as e:
+                    self.logger.warning(f"  Error parsing description: {str(e)}")
+
+            # Check if this box contains opening hours
+            if "Heures d'ouverture" in box_text or "Horaires" in box_text or "notOnMobile eD" in box.get_attribute('class'):
+                try:
+                    # Try to find opening hours elements
+                    opening_hours_items = box.find_elements(By.CSS_SELECTOR, 'li[data-cy="opening-hours-weekdays"]')
+
+                    if opening_hours_items:
+                        self.logger.info(f"  Found {len(opening_hours_items)} opening hours entries")
+
+                        # Map day names (French/German/Italian) to our field names
+                        day_mapping = {
+                            'lundi': 'hours_monday',
+                            'monday': 'hours_monday',
+                            'montag': 'hours_monday',
+                            'lunedì': 'hours_monday',
+                            'mardi': 'hours_tuesday',
+                            'tuesday': 'hours_tuesday',
+                            'dienstag': 'hours_tuesday',
+                            'martedì': 'hours_tuesday',
+                            'mercredi': 'hours_wednesday',
+                            'wednesday': 'hours_wednesday',
+                            'mittwoch': 'hours_wednesday',
+                            'mercoledì': 'hours_wednesday',
+                            'jeudi': 'hours_thursday',
+                            'thursday': 'hours_thursday',
+                            'donnerstag': 'hours_thursday',
+                            'giovedì': 'hours_thursday',
+                            'vendredi': 'hours_friday',
+                            'friday': 'hours_friday',
+                            'freitag': 'hours_friday',
+                            'venerdì': 'hours_friday',
+                            'samedi': 'hours_saturday',
+                            'saturday': 'hours_saturday',
+                            'samstag': 'hours_saturday',
+                            'sabato': 'hours_saturday',
+                            'dimanche': 'hours_sunday',
+                            'sunday': 'hours_sunday',
+                            'sonntag': 'hours_sunday',
+                            'domenica': 'hours_sunday'
+                        }
+
+                        for item in opening_hours_items:
+                            item_text = item.text.strip()
+                            # Split into day and hours
+                            parts = item_text.split('\n', 1)
+                            if len(parts) == 2:
+                                day_name = parts[0].strip().lower()
+                                hours = parts[1].strip()
+
+                                # Find matching field name
+                                for key, field_name in day_mapping.items():
+                                    if key in day_name:
+                                        detail_data[field_name] = hours
+                                        break
+
+                        self.logger.info(f"  ✓ Opening hours extracted")
+
+                except Exception as e:
+                    self.logger.warning(f"  Error parsing opening hours: {str(e)}")
+
+            # Check if this box contains average rating
+            try:
+                rating_elem = box.find_elements(By.CSS_SELECTOR, 'span[data-testid="average-rating"]')
+                if rating_elem:
+                    detail_data['average_rating'] = self.clean_text(rating_elem[0].text)
+                    self.logger.info(f"  ✓ Average rating: {detail_data['average_rating']}")
+            except Exception as e:
+                self.logger.warning(f"  Error parsing average rating: {str(e)}")
+
+        detail_data['phone_numbers'] = ''
+        phone_parts = self.normalize_phone_list(detail_data['phone_numbers_raw'])
+        detail_data['phone_numbers'] = phone_parts['phone_numbers']
+        detail_data['mobile_numbers'] = phone_parts['mobile_numbers']
+        detail_data['landline_numbers'] = phone_parts['landline_numbers']
+        detail_data['has_mobile'] = phone_parts['has_mobile']
+        if detail_data['has_mobile']:
+            self.logger.info(f"  ✓ Mobile numbers: {detail_data['mobile_numbers']}")
+        if detail_data['landline_numbers']:
+            self.logger.info(f"  ✓ Landline numbers: {detail_data['landline_numbers']}")
+
+        # Banner/display ads on this Local.ch detail page (§3.2)
+        detail_data.update(self.detect_localch_banner_ads())
+
+        # Get languages
+        try:
+            headers = self.driver.find_elements(By.CLASS_NAME, "DescriptionContent_detailListTitle__hIIB6")
+
+            for header in headers:
+                if header.text.strip() == "Langues":
+                    languages_dd = header.find_element(By.XPATH, "./following-sibling::dd[1]")
+                    language_spans = languages_dd.find_elements(By.CLASS_NAME, "DescriptionContent_detailListContentAttribute__zhs_H")
+                    langs = [span.text.strip().rstrip(',') for span in language_spans]
+                    detail_data['languages'] = self.clean_text(', '.join(langs))
+                    break
+        except NoSuchElementException:
+            pass
+
+        # Count images/pictures
+        detail_data['picture_count'] = self.count_images()
+
+        # Count reviews
+        detail_data['review_count'] = self.count_reviews()
+
+        # Check for social media links and extract URLs
+        social_media_links = self.check_social_media_links()
+        detail_data['facebook_url'] = social_media_links['facebook_url']
+        detail_data['instagram_url'] = social_media_links['instagram_url']
+        detail_data['linkedin_url'] = social_media_links['linkedin_url']
+        detail_data['twitter_url'] = social_media_links['twitter_url']
+        detail_data['youtube_url'] = social_media_links['youtube_url']
+        # Set has_social_media to True if any social media link found
+        detail_data['has_social_media'] = any(social_media_links.values())
+
+        # Restore implicit wait before any further navigation
+        self.driver.implicitly_wait(1)
+
+        # If website exists and (check_websites OR check_zip) is enabled
+        if (self.check_websites or self.check_zip) and detail_data['website']:
+            self.logger.info(f"  Analyzing website: {detail_data['website']}")
+            copyright_year, has_local_search, has_zip = self.check_website_for_localsearch_and_copyright(detail_data['website'])
+            detail_data['copyright_year'] = copyright_year
+            detail_data['has_local_search'] = has_local_search
+            detail_data['zip'] = 'Yes' if has_zip else 'No'
+        else:
+            # Set default values when website checking is disabled
+            detail_data['copyright_year'] = 'N/A'
+            detail_data['has_local_search'] = 'N/A'
+            detail_data['zip'] = 'N/A'
+
+        # Check Moneyhouse.ch for person/management data
+        if self.check_moneyhouse:
+            persons, moneyhouse_url = self.scrape_moneyhouse_persons(detail_data['title'])
+            detail_data['persons'] = persons
+            detail_data['moneyhouse_url'] = moneyhouse_url
+        else:
+            detail_data['persons'] = []
+            detail_data['moneyhouse_url'] = 'N/A'
+
+        # Check Architectes.ch presence
+        if self.check_architectes:
+            detail_data['on_architectes_ch'] = self.check_google_presence(detail_data['title'], 'architectes.ch')
+        else:
+            detail_data['on_architectes_ch'] = 'N/A'
+
+        # Check Editions-bienvivre.ch presence
+        if self.check_bienvivre:
+            detail_data['on_bienvivre_ch'] = self.check_google_presence(detail_data['title'], 'editions-bienvivre.ch')
+        else:
+            detail_data['on_bienvivre_ch'] = 'N/A'
+
+        # Google Business Profile (official Places API — URL, rating, review count)
+        if self.check_gmb:
+            gmb = self.fetch_google_business_profile(
+                detail_data['title'],
+                street=detail_data.get('street', ''),
+                zipcode=detail_data.get('zipcode', ''),
+                city=detail_data.get('city', ''),
+            )
+            detail_data.update(gmb)
+        else:
+            detail_data.update(self.empty_gmb_profile(disabled=True))
+
+        # Scrape Languages, Forms of contact, Location, Categories from detail sections
+        try:
+            # Find all h3 with class "ps" (section headers)
+            section_headers = self.driver.find_elements(By.CSS_SELECTOR, "h3.ps")
+
+            for header in section_headers:
+                try:
+                    header_text = header.text.strip().lower()
+
+                    # Get ONLY the dd element that immediately follows this h3
+                    next_element = header.find_element(By.XPATH, "./following-sibling::dd[1]")
+                    value_spans = next_element.find_elements(By.CSS_SELECTOR, "span.pp")
+
+                    values = [span.text.strip() for span in value_spans if span.text.strip()]
+
+                    if 'language' in header_text or 'sprache' in header_text or 'langue' in header_text:
+                        detail_data['languages'] = values
+                        self.logger.info(f"  ✓ Languages: {', '.join(values)}")
+
+                    elif 'forms of contact' in header_text or 'kontaktformen' in header_text or 'formes de contact' in header_text or 'forme' in header_text:
+                        detail_data['forms_of_contact'] = values
+                        self.logger.info(f"  ✓ Forms of contact: {', '.join(values)}")
+
+                    elif 'location' in header_text or 'standort' in header_text or 'emplacement' in header_text:
+                        detail_data['location_attributes'] = values
+                        self.logger.info(f"  ✓ Location: {', '.join(values)}")
+
+                except Exception as e:
+                    self.logger.debug(f"  Error parsing section: {e}")
+
+            # Scrape Categories (dt.ps followed by dd with links)
+            try:
+                category_headers = self.driver.find_elements(By.CSS_SELECTOR, "dt.ps")
+                for header in category_headers:
+                    if 'categor' in header.text.strip().lower():
+                        parent = header.find_element(By.XPATH, "./..")
+                        category_links = parent.find_elements(By.CSS_SELECTOR, "dd a.cH.pr")
+                        categories = [link.text.strip() for link in category_links if link.text.strip()]
+                        detail_data['categories'] = categories
+                        self.logger.info(f"  ✓ Categories: {', '.join(categories)}")
+                        break
+            except Exception as e:
+                self.logger.debug(f"  Error parsing categories: {e}")
+
+        except Exception as e:
+            self.logger.warning(f"  Error scraping detail sections: {e}")
+
+        # Calculate credibility score
+        detail_data['credibility_score'] = self.calculate_credibility_score(detail_data)
+
+        return detail_data
+
+    def scrape(self, max_search_pages=10, max_companies=None):
+        """Main scraping function.
+
+        Args:
+            max_search_pages: Maximum number of search result pages to scrape
+            max_companies: Maximum number of companies to scrape (None = all found)
+        """
+        try:
+            # Setup WebDriver
+            self.setup_driver()
+
+            # Step 1: Search by keyword (with language filters applied via UI)
+            company_links = self.search_by_keyword(max_pages=max_search_pages)
+
+            if not company_links:
+                self.logger.warning("No company links found")
+                return
+
+            self.logger.info(f"Found {len(company_links)} companies")
+            self.report_progress(
+                'search_complete',
+                f'Collected {len(company_links)} company links',
+                total_links=len(company_links)
+            )
+
+            # Step 2: Scrape each company's detail page
+            # Limit companies if max_companies is specified
+            if max_companies and max_companies > 0:
+                max_companies = min(max_companies, len(company_links))
+                self.logger.info(f"Limiting to {max_companies} companies")
+            else:
+                max_companies = len(company_links)
+                self.logger.info(f"Scraping all {max_companies} companies")
+
+            for i, link in enumerate(company_links[:max_companies], 1):
+                if link in self.processed_urls:
+                    self.logger.info(f"Skipping already processed link {i}/{max_companies}: {link}")
+                    continue
+
+                self.logger.info(f"Scraping company {i}/{max_companies}: {link}")
+                self.report_progress(
+                    'detail_page_queue',
+                    f'Scraping company {i}/{max_companies}',
+                    current_url=link,
+                    company_index=i,
+                    total_companies=max_companies
+                )
+
+                try:
+                    detail_data = self.scrape_detail_page(link)
+
+                    if detail_data:
+                        self.results.append(detail_data)
+                        self.processed_urls.add(link)
+
+                except Exception as e:
+                    self.logger.error(f"Error processing link {link}: {str(e)}")
+                    continue
+
+                # Random delay to avoid being blocked
+                import random
+                delay = random.uniform(1, 2)
+                time.sleep(delay)
+
+            # Export to Excel (when run standalone)
+            self.export_to_excel(f'{self.keyword}_scraped_results.xlsx')
+            self.logger.info(f"Scraping completed! Total records: {len(self.results)}")
+
+        except Exception as e:
+            self.logger.error(f"Error during scraping: {str(e)}")
+            # Try to export partial results
+            try:
+                self.export_to_excel(f'{self.keyword}_partial_results.xlsx')
+            except:
+                pass
+        finally:
+            if self.driver:
+                self.driver.quit()
+
+def main():
+    # Example usage: scrape for "plumber"
+    keyword = input("Enter search keyword (e.g., 'plumber', 'restaurant', 'dentist'): ").strip()
+    if not keyword:
+        keyword = "plumber"
+
+    max_pages = input("Enter maximum number of search pages to scrape (default: 10): ").strip()
+    if not max_pages:
+        max_pages = 10
+    else:
+        max_pages = int(max_pages)
+
+    scraper = LocalChScraper(keyword=keyword)
+    scraper.scrape(max_search_pages=max_pages)
+
+if __name__ == "__main__":
+    main()

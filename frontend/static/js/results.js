@@ -516,6 +516,18 @@ async function viewCompany(companyId) {
                             <td style="padding: 0.75rem 0;">${renderBooleanBadge(company.has_local_search)}</td>
                         </tr>
                         <tr style="border-bottom: 1px solid var(--border-gray);">
+                            <td style="padding: 0.75rem 0; font-weight: 600;">Yellow rated</td>
+                            <td style="padding: 0.75rem 0;">${renderBooleanBadge(company.yellow_rated)}</td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid var(--border-gray);">
+                            <td style="padding: 0.75rem 0; font-weight: 600;">Robot flags</td>
+                            <td style="padding: 0.75rem 0;">${Array.isArray(company.robot_flags) && company.robot_flags.length ? company.robot_flags.join(', ') : 'N/A'}</td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid var(--border-gray);">
+                            <td style="padding: 0.75rem 0; font-weight: 600;">Score model</td>
+                            <td style="padding: 0.75rem 0;">${company.score_model_version || 'N/A'}</td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid var(--border-gray);">
                             <td style="padding: 0.75rem 0; font-weight: 600;">Local.ch Banner Ads</td>
                             <td style="padding: 0.75rem 0;">${renderBooleanBadge(company.has_localch_banner_ads)}</td>
                         </tr>

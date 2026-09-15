@@ -27,6 +27,11 @@ load_dotenv()
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../scraper'))
 from scraper import LocalChScraper, LocalChBlockedError
 from pipedrive_dedupe import dedupe_for_pipedrive_create
+from pipedrive_fields import (
+    remap_dataframe_for_pipedrive,
+    build_field_keys_sheet,
+    field_keys_status,
+)
 
 app = Flask(__name__)
 CORS(app)
@@ -432,11 +437,13 @@ def build_export_dataframe(job_id=None, keyword=None, score_min=None, score_max=
     return pd.DataFrame(export_rows)
 
 
-def build_export_workbook(df):
+def build_export_workbook(df, include_field_keys_sheet=False):
     """Serialize companies dataframe to an XLSX workbook."""
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Companies')
+        if include_field_keys_sheet:
+            build_field_keys_sheet().to_excel(writer, index=False, sheet_name='PipedriveFieldKeys')
     output.seek(0)
     return output
 
@@ -824,7 +831,17 @@ def export_companies():
 @app.route('/api/pipedrive-import/config', methods=['GET'])
 @api_login_required
 def pipedrive_import_config():
-    return jsonify({'enabled': PIPEDRIVE_IMPORT_ENABLED})
+    return jsonify({
+        'enabled': PIPEDRIVE_IMPORT_ENABLED,
+        'field_keys': field_keys_status(),
+    })
+
+
+@app.route('/api/pipedrive-import/field-keys', methods=['GET'])
+@api_login_required
+def pipedrive_field_keys():
+    """§5.1 / §7 item 2 — Pipedrive custom field API key confirmation status."""
+    return jsonify(field_keys_status())
 
 
 @app.route('/api/pipedrive-import/jobs/<job_id>/start', methods=['POST'])
@@ -862,7 +879,8 @@ def start_pipedrive_import(job_id):
         }), 400
 
     df = build_export_dataframe(companies=create_rows)
-    workbook = build_export_workbook(df)
+    df = remap_dataframe_for_pipedrive(df)
+    workbook = build_export_workbook(df, include_field_keys_sheet=True)
     filename = f"localch_export_{job.get('keyword', 'job')}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.xlsx"
 
     # Persist dedupe outcome on the job for auditability

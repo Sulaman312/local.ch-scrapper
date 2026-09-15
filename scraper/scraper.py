@@ -18,6 +18,7 @@ import urllib3
 import random
 from pathlib import Path
 from pymongo import MongoClient
+from score_model import calculate_credibility_score as compute_score_model, SCORE_MODEL_VERSION
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -113,6 +114,11 @@ class LocalChScraper:
         self.classifications_collection = None
         self._openai_session = requests.Session()
         self._places_session = requests.Session()
+        self.proxy_pool = []
+        self.proxy_rotation_enabled = False
+        self._proxy_index = 0
+        self.current_proxy = None
+        self._proxy_auth_extension_dir = None
 
         # Setup logging
         log_filename = f'scraping_log_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
@@ -126,6 +132,11 @@ class LocalChScraper:
         )
         self.logger = logging.getLogger(__name__)
 
+        self.proxy_pool = self._load_proxy_pool()
+        self.proxy_rotation_enabled = (
+            os.getenv('PROXY_ROTATION', 'true').strip().lower() == 'true'
+            and bool(self.proxy_pool)
+        )
         if self.save_debug_artifacts:
             safe_keyword = re.sub(r'[^a-zA-Z0-9_-]+', '_', self.keyword).strip('_') or 'keyword'
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -176,11 +187,113 @@ class LocalChScraper:
         except Exception as e:
             self.logger.warning(f"Could not save page HTML for {label}: {e}")
 
+    def _load_proxy_pool(self):
+        """Load proxy pool from PROXY_URLS / PROXY_POOL / PROXY_LIST_FILE (§6)."""
+        proxies = []
+        raw = (os.getenv('PROXY_URLS') or os.getenv('PROXY_POOL') or '').strip()
+        if raw:
+            parts = re.split(r'[\n,;]+', raw)
+            proxies.extend(p.strip() for p in parts if p.strip())
+
+        list_file = (os.getenv('PROXY_LIST_FILE') or '').strip()
+        if list_file and Path(list_file).exists():
+            try:
+                text = Path(list_file).read_text(encoding='utf-8')
+                parts = re.split(r'[\n,;]+', text)
+                proxies.extend(p.strip() for p in parts if p.strip() and not p.strip().startswith('#'))
+            except Exception as e:
+                self.logger.warning(f"Could not read PROXY_LIST_FILE: {e}")
+
+        # De-dupe preserving order
+        seen = set()
+        unique = []
+        for proxy in proxies:
+            if proxy not in seen:
+                seen.add(proxy)
+                unique.append(proxy)
+        if unique:
+            self.logger.info(f"Proxy pool loaded: {len(unique)} endpoint(s)")
+        else:
+            self.logger.info("Proxy pool empty — using direct connection (UA rotation only)")
+        return unique
+
+    @staticmethod
+    def _parse_proxy(proxy_url):
+        """Return (scheme, host, port, username, password, chrome_server)."""
+        raw = proxy_url.strip()
+        if '://' not in raw:
+            raw = 'http://' + raw
+        parsed = urlparse(raw)
+        scheme = (parsed.scheme or 'http').lower()
+        host = parsed.hostname or ''
+        port = parsed.port or (443 if scheme == 'https' else 80)
+        username = parsed.username
+        password = parsed.password
+        if scheme.startswith('socks'):
+            chrome_server = f'{scheme}://{host}:{port}'
+        else:
+            chrome_server = f'{host}:{port}'
+        return scheme, host, port, username, password, chrome_server
+
+    def _next_proxy(self):
+        if not self.proxy_pool:
+            self.current_proxy = None
+            return None
+        if self.proxy_rotation_enabled:
+            proxy = self.proxy_pool[self._proxy_index % len(self.proxy_pool)]
+            self._proxy_index += 1
+        else:
+            proxy = self.proxy_pool[0]
+        self.current_proxy = proxy
+        return proxy
+
+    def _build_proxy_auth_extension(self, host, port, username, password):
+        """Chrome extension for authenticated HTTP proxies."""
+        import tempfile
+        import zipfile
+
+        manifest = '''{
+  "version": "1.0.0",
+  "manifest_version": 2,
+  "name": "Proxy Auth",
+  "permissions": ["proxy", "tabs", "unlimitedStorage", "storage", "<all_urls>", "webRequest", "webRequestBlocking"],
+  "background": {"scripts": ["background.js"]}
+}'''
+        background = f'''
+var config = {{
+  mode: "fixed_servers",
+  rules: {{
+    singleProxy: {{ scheme: "http", host: "{host}", port: {int(port)} }},
+    bypassList: ["localhost", "127.0.0.1"]
+  }}
+}};
+chrome.proxy.settings.set({{value: config, scope: "regular"}}, function(){{}});
+function callbackFn(details) {{
+  return {{ authCredentials: {{ username: "{username}", password: "{password}" }} }};
+}}
+chrome.webRequest.onAuthRequired.addListener(
+  callbackFn,
+  {{urls: ["<all_urls>"]}},
+  ["blocking"]
+);
+'''
+        tmp_dir = tempfile.mkdtemp(prefix='chrome_proxy_auth_')
+        ext_path = Path(tmp_dir) / 'proxy_auth.zip'
+        with zipfile.ZipFile(ext_path, 'w') as zp:
+            zp.writestr('manifest.json', manifest)
+            zp.writestr('background.js', background)
+        self._proxy_auth_extension_dir = tmp_dir
+        return str(ext_path)
+
     def setup_driver(self):
-        """Initialize the Chrome WebDriver with anti-detection measures."""
+        """Initialize the Chrome WebDriver with anti-detection + optional proxy (§6)."""
         import os
         import shutil
         from selenium.webdriver.chrome.service import Service
+
+        # Rotate UA (+ proxy) on every driver (re)start
+        self.user_agent = random.choice(USER_AGENTS)
+        proxy_url = self._next_proxy()
 
         options = webdriver.ChromeOptions()
         options.page_load_strategy = 'eager'
@@ -210,6 +323,18 @@ class LocalChScraper:
         options.add_argument(f'--user-agent={self.user_agent}')
         self.logger.info(f"Using User-Agent: {self.user_agent}")
 
+        if proxy_url:
+            scheme, host, port, username, password, chrome_server = self._parse_proxy(proxy_url)
+            if username and password and scheme.startswith('http'):
+                ext = self._build_proxy_auth_extension(host, port, username, password)
+                options.add_extension(ext)
+                self.logger.info(f"Using authenticated proxy {host}:{port}")
+            else:
+                options.add_argument(f'--proxy-server={chrome_server}')
+                self.logger.info(f"Using proxy {chrome_server}")
+        else:
+            self.logger.info("No proxy configured for this session")
+
         # For Railway/production - use system chromium and chromedriver
         service = None
         if os.path.exists('/nix/store'):
@@ -237,7 +362,8 @@ class LocalChScraper:
             self.logger.info("WebDriver initialized successfully")
             self.report_progress(
                 'driver_ready',
-                f"Chrome ready in {'headed' if headed_mode else 'headless'} mode",
+                f"Chrome ready in {'headed' if headed_mode else 'headless'} mode"
+                + (f" via proxy" if proxy_url else ""),
                 current_url='',
                 page_number=None
             )
@@ -1297,79 +1423,19 @@ class LocalChScraper:
 
     def calculate_credibility_score(self, data):
         """
-        Calculate credibility score based on profile completeness.
-        Total: 100 points
+        Reconciled score model v3 (see score_model.py).
+
+        Returns integer credibility_score for backward compatibility.
+        Also writes score_breakdown / robot_flags / yellow_rated onto `data`.
         """
-        score = 0
-
-        # Description (15 points)
-        if data['description'] and len(data['description']) > 100:
-            score += 15
-        elif data['description']:
-            score += 8
-
-        # Pictures (15 points)
-        if data['picture_count'] >= 5:
-            score += 15
-        elif data['picture_count'] >= 3:
-            score += 10
-        elif data['picture_count'] >= 1:
-            score += 5
-
-        # Reviews (15 points)
-        if data['review_count'] >= 10:
-            score += 15
-        elif data['review_count'] >= 5:
-            score += 10
-        elif data['review_count'] >= 1:
-            score += 5
-
-        # Contact info (15 points base) + mobile scored signal (§4)
-        if data.get('phone_numbers') or data.get('landline_numbers') or data.get('mobile_numbers'):
-            score += 5
-        if data.get('email'):
-            score += 5
-        if data.get('website'):
-            score += 5
-        if data.get('has_mobile') or data.get('mobile_numbers'):
-            score += 5  # Mobile (076/077/078/079) is an explicit scored signal
-
-        # Social media (10 points)
-        if data['has_social_media']:
-            score += 10
-
-        # Address (10 points)
-        if data['street'] and data['zipcode'] and data['city']:
-            score += 10
-
-        # Local Search Detection (10 points) - NEGATIVE INDICATOR
-        # Companies using Local Search are likely in contracts, less valuable leads
-        if data['has_local_search']:
-            score -= 10  # Penalty for being a Local Search customer
-
-        # Banner/display ads on Local.ch (§3.2) — yellow/robot signal
-        if data.get('has_localch_banner_ads') is True:
-            score -= 10
-
-        # Copyright Year (10 points) - NEGATIVE INDICATOR for recent years
-        # Recent copyright year (2024-2026) = likely in new contract
-        if data['copyright_year']:
-            try:
-                year = int(data['copyright_year'])
-                current_year = datetime.now().year
-
-                if year >= current_year - 1:  # 2025 or 2026 (very recent)
-                    score -= 10  # Strong penalty - definitely in contract
-                elif year >= current_year - 3:  # 2023-2024 (recent)
-                    score -= 5   # Moderate penalty - likely in contract
-                # Older years (before 2023) get no penalty - contract likely expired
-            except:
-                pass
-
-        # Ensure score stays within 0-100 range
-        score = max(0, min(100, score))
-
-        return score
+        result = compute_score_model(data)
+        data['score_model_version'] = result['score_model_version']
+        data['score_breakdown'] = result['score_breakdown']
+        data['profile_score'] = result['profile_score']
+        data['robot_penalty'] = result['robot_penalty']
+        data['robot_flags'] = result['robot_flags']
+        data['yellow_rated'] = result['yellow_rated']
+        return result['credibility_score']
 
     def clean_text(self, text):
         """Clean and format text."""
@@ -1888,6 +1954,12 @@ class LocalChScraper:
             'hours_saturday': '',
             'hours_sunday': '',
             'credibility_score': 0,
+            'score_model_version': SCORE_MODEL_VERSION,
+            'score_breakdown': {},
+            'profile_score': 0,
+            'robot_penalty': 0,
+            'robot_flags': [],
+            'yellow_rated': False,
             # New fields from detail sections
             'languages': [],
             'forms_of_contact': [],

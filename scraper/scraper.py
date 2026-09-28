@@ -1881,6 +1881,84 @@ chrome.webRequest.onAuthRequired.addListener(
             self.cookie_consent_handled = True
             return False
 
+    def requires_browser_enrichment(self):
+        """Whether any selected post-Apify enrichment still needs Selenium."""
+        return any((
+            self.check_websites,
+            self.check_zip,
+            self.check_moneyhouse,
+            self.check_architectes,
+            self.check_bienvivre,
+        ))
+
+    def enrich_company_record(self, detail_data):
+        """Apply the existing optional enrichments to an Apify company row.
+
+        Local.ch extraction is intentionally absent here. This method preserves
+        the former checkbox behavior after the base company profile has already
+        been acquired and normalized by Apify.
+        """
+        if not detail_data:
+            return None
+
+        title = detail_data.get('title', '')
+        legal_name = detail_data.get('_legal_name') or title
+        classification = self.classify_title_with_openai(legal_name) if legal_name else None
+        if classification:
+            detail_data['is_independent'] = classification.get('is_independent')
+            detail_data['independent_classification'] = classification.get('classification') or ''
+            detail_data['independent_classification_reason'] = classification.get('reason') or ''
+            detail_data['independent_classification_source'] = classification.get('source') or ''
+
+        if detail_data.get('is_independent') is True and not self.include_independents:
+            self.logger.info("Skipping independent company due to scrape settings: %s", title)
+            return None
+
+        if self.requires_browser_enrichment() and not self.driver:
+            raise RuntimeError("Selenium driver is required for the selected enrichment options")
+
+        website = detail_data.get('website', '')
+        if (self.check_websites or self.check_zip) and website:
+            self.logger.info("  Analyzing website: %s", website)
+            copyright_year, has_local_search, has_zip = self.check_website_for_localsearch_and_copyright(website)
+            detail_data['copyright_year'] = copyright_year
+            detail_data['has_local_search'] = has_local_search
+            detail_data['zip'] = 'Yes' if has_zip else 'No'
+        else:
+            detail_data['copyright_year'] = 'N/A'
+            detail_data['has_local_search'] = 'N/A'
+            detail_data['zip'] = 'N/A'
+
+        if self.check_moneyhouse:
+            persons, moneyhouse_url = self.scrape_moneyhouse_persons(title)
+            detail_data['persons'] = persons
+            detail_data['moneyhouse_url'] = moneyhouse_url
+        else:
+            detail_data['persons'] = []
+            detail_data['moneyhouse_url'] = 'N/A'
+
+        detail_data['on_architectes_ch'] = (
+            self.check_google_presence(title, 'architectes.ch')
+            if self.check_architectes else 'N/A'
+        )
+        detail_data['on_bienvivre_ch'] = (
+            self.check_google_presence(title, 'editions-bienvivre.ch')
+            if self.check_bienvivre else 'N/A'
+        )
+
+        if self.check_gmb:
+            detail_data.update(self.fetch_google_business_profile(
+                title,
+                street=detail_data.get('street', ''),
+                zipcode=detail_data.get('zipcode', ''),
+                city=detail_data.get('city', ''),
+            ))
+        else:
+            detail_data.update(self.empty_gmb_profile(disabled=True))
+
+        detail_data['credibility_score'] = self.calculate_credibility_score(detail_data)
+        return detail_data
+
     @retry_on_exception(retries=3, delay=5)
     def scrape_detail_page(self, url):
         """Scrape comprehensive data from a company detail page."""

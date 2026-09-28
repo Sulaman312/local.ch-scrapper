@@ -94,6 +94,9 @@ htmlcov/
 *.backup
 archive_backup/
 
+# Standalone reference implementation (not part of this application)
+apify-repo/
+
 # Temporary files
 tmp/
 temp/

@@ -25,7 +25,11 @@ load_dotenv()
 
 # Add scraper directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../scraper'))
-from scraper import LocalChScraper, LocalChBlockedError
+from scraper import LocalChScraper
+from apify_scraper import (
+    ApifyLocalChScraper,
+    ApifyRunStopped,
+)
 from pipedrive_dedupe import dedupe_for_pipedrive_create
 from pipedrive_fields import (
     remap_dataframe_for_pipedrive,
@@ -137,23 +141,44 @@ def sanitize_for_json(value):
     return value
 
 
+def format_requested_pages(start_page, max_pages):
+    """Return the legacy page selection as a user-facing label."""
+    start = max(1, int(start_page or 1))
+    if max_pages:
+        end = max(start, int(max_pages))
+        return str(start) if start == end else f'{start}–{end}'
+    return 'All pages' if start == 1 else f'{start} onward'
+
+
 def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page=1, include_independents=False,
                            check_websites=False, check_moneyhouse=False, check_architectes=False,
                            check_bienvivre=False, check_zip=False, check_gmb=False):
-    """Run scraper in background and save results to MongoDB"""
+    """Acquire local.ch via Apify, then run the existing optional enrichments."""
     scraper = None
+    requested_pages = format_requested_pages(start_page, max_pages)
+    stage_labels = {
+        'starting': 'Starting',
+        'search_page_loading': 'Preparing local.ch search',
+        'apify_run_started': 'Starting local.ch search',
+        'apify_run_polling': 'Collecting company profiles',
+        'apify_run_succeeded': 'Company profiles collected',
+        'search_page_processed': 'Preparing company records',
+        'driver_starting': 'Starting optional website checks',
+        'driver_ready': 'Optional website checks ready',
+        'detail_page_queue': 'Enriching company records',
+    }
     try:
-        # Update job status to running
-        jobs_collection.update_one(
-            {'_id': ObjectId(job_id)},
+        start_update = jobs_collection.update_one(
+            {'_id': ObjectId(job_id), 'status': 'pending'},
             {'$set': {
                 'status': 'running',
+                'backend': 'apify',
                 'started_at': datetime.now(timezone.utc),
                 'debug_mode': SCRAPER_DEBUG_MODE,
                 'debug_artifacts_enabled': SCRAPER_SAVE_DEBUG_ARTIFACTS,
-                'current_stage': 'starting',
-                'current_message': 'Initializing scraper',
-                'current_page': None,
+                'current_stage': stage_labels['starting'],
+                'current_message': 'Initializing local.ch acquisition',
+                'current_page': requested_pages,
                 'current_url': None,
                 'page_title': None,
                 'found_links': 0,
@@ -161,20 +186,36 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page
                 'last_progress_at': datetime.now(timezone.utc)
             }}
         )
+        if start_update.matched_count == 0:
+            return
 
         def progress_callback(stage, message, **extra):
             update_fields = {
-                'current_stage': stage,
+                'current_stage': stage_labels.get(
+                    stage,
+                    str(stage).replace('_', ' ').strip().title()
+                ),
                 'current_message': message,
+                'current_page': requested_pages,
                 'last_progress_at': datetime.now(timezone.utc)
             }
             allowed_fields = [
                 'page_number', 'current_url', 'page_title', 'found_links',
-                'new_links', 'total_links', 'company_index', 'total_companies'
+                'new_links', 'total_links', 'company_index', 'total_companies',
+                'run_id', 'dataset_id'
             ]
             for field in allowed_fields:
                 if field in extra:
-                    mapped_field = 'current_page' if field == 'page_number' else field
+                    if field == 'page_number':
+                        # Apify is listing-based, so its internal progress does
+                        # not represent the page range chosen in the dashboard.
+                        continue
+                    elif field == 'run_id':
+                        mapped_field = 'apify_run_id'
+                    elif field == 'dataset_id':
+                        mapped_field = 'apify_dataset_id'
+                    else:
+                        mapped_field = field
                     update_fields[mapped_field] = extra[field]
 
             jobs_collection.update_one(
@@ -182,7 +223,6 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page
                 {'$set': update_fields}
             )
 
-        # Create scraper instance
         scraper = LocalChScraper(
             keyword=keyword,
             include_independents=include_independents,
@@ -197,116 +237,94 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page
             progress_callback=progress_callback
         )
 
-        # Setup driver first
-        scraper.setup_driver()
+        def should_stop():
+            if stop_flags.get(job_id):
+                return True
+            job = jobs_collection.find_one({'_id': ObjectId(job_id)})
+            return bool(job and job.get('status') == 'stopped')
 
-        # Get total companies to scrape
-        company_links = scraper.search_by_keyword(max_pages=max_pages, start_page=start_page)
-        if max_companies and max_companies > 0:
-            total_to_scrape = max_companies
-        else:
-            total_to_scrape = len(company_links)
+        source = ApifyLocalChScraper(
+            keyword=keyword,
+            helper=scraper,
+            progress_callback=progress_callback,
+            should_stop=should_stop,
+        )
+        company_rows = source.search_by_keyword(
+            max_pages=max_pages,
+            start_page=start_page,
+            max_companies=max_companies,
+        )
 
-        # Update job with total expected companies
+        target_companies = max_companies if max_companies and max_companies > 0 else None
+        total_to_scrape = min(target_companies, len(company_rows)) if target_companies else len(company_rows)
         jobs_collection.update_one(
             {'_id': ObjectId(job_id)},
             {'$set': {'total_companies': total_to_scrape, 'companies_scraped': 0}}
         )
 
-        # Monkey-patch the scrape_detail_page method to save incrementally
-        original_scrape_detail = scraper.scrape_detail_page
+        browser_enrichment = scraper.requires_browser_enrichment()
+        if browser_enrichment:
+            progress_callback('driver_starting', 'Starting browser for optional enrichments')
+            scraper.setup_driver()
 
-        def scrape_detail_with_save(url):
-            # Run original scrape
-            detail_data = original_scrape_detail(url)
-
-            if detail_data:
-                # Save to MongoDB immediately
-                detail_data['job_id'] = ObjectId(job_id)
-                detail_data['keyword'] = keyword
-                detail_data['created_at'] = datetime.now(timezone.utc)
-                detail_data['status'] = 'new'
-                detail_data['user_notes'] = ''
-                companies_collection.insert_one(detail_data)
-
-                # Update job progress
-                companies_scraped = companies_collection.count_documents({'job_id': ObjectId(job_id)})
-                jobs_collection.update_one(
-                    {'_id': ObjectId(job_id)},
-                    {'$set': {'companies_scraped': companies_scraped}}
-                )
-
-            return detail_data
-
-        scraper.scrape_detail_page = scrape_detail_with_save
-
-        target_companies = max_companies if max_companies and max_companies > 0 else None
-        attempted_links = 0
+        attempted_companies = 0
         saved_companies = 0
-
-        for link in company_links:
-            # Check if job should be stopped
-            if job_id in stop_flags and stop_flags[job_id]:
+        for row in company_rows:
+            if should_stop():
                 scraper.logger.info(f"Job {job_id} stopped by user request")
                 break
-
-            if link in scraper.processed_urls:
-                continue
-
             if target_companies is not None and saved_companies >= target_companies:
                 scraper.logger.info(f"Reached target of {target_companies} kept companies")
                 break
 
-            attempted_links += 1
-
-            # Restart Chrome every 10 companies to prevent memory issues
-            if attempted_links > 1 and (attempted_links - 1) % 10 == 0:
-                scraper.logger.info(f"Restarting Chrome after {attempted_links - 1} processed links to clear memory...")
+            attempted_companies += 1
+            if browser_enrichment and attempted_companies > 1 and (attempted_companies - 1) % 10 == 0:
+                scraper.logger.info(
+                    "Restarting Chrome after %s enriched companies to clear memory...",
+                    attempted_companies - 1,
+                )
                 try:
                     if scraper.driver:
                         scraper.driver.quit()
                     import time
-                    time.sleep(2)  # Wait for cleanup
+                    time.sleep(2)
                     scraper.setup_driver()
-                    scraper.logger.info("Chrome restarted successfully")
                 except Exception as e:
-                    scraper.logger.error(f"Error restarting Chrome: {str(e)}")
-                    # Try to continue anyway
-                    pass
+                    scraper.logger.error("Error restarting Chrome: %s", e)
 
-            target_display = target_companies if target_companies is not None else len(company_links)
-            scraper.logger.info(
-                f"Scraping company candidate {attempted_links} (kept {saved_companies}/{target_display}): {link}"
+            progress_callback(
+                'detail_page_queue',
+                f"Processing company {attempted_companies}/{len(company_rows)}",
+                current_url=row.get('url', ''),
+                company_index=attempted_companies,
+                total_companies=len(company_rows),
             )
-
             try:
-                detail_data = scraper.scrape_detail_page(link)
-
-                if detail_data:
-                    scraper.results.append(detail_data)
-                    scraper.processed_urls.add(link)
-                    saved_companies += 1
-
+                detail_data = scraper.enrich_company_record(row)
             except Exception as e:
-                scraper.logger.error(f"Error processing link {link}: {str(e)}")
+                scraper.logger.error("Error enriching %s: %s", row.get('url', ''), e)
                 continue
 
-            # Random delay to avoid being blocked
-            import random
-            import time
-            delay = random.uniform(1, 2)
-            time.sleep(delay)
+            if not detail_data:
+                continue
 
-        # Final update - mark as completed or stopped
+            detail_data.pop('_apify_listing_id', None)
+            detail_data.pop('_legal_name', None)
+            detail_data['job_id'] = ObjectId(job_id)
+            detail_data['keyword'] = keyword
+            detail_data['created_at'] = datetime.now(timezone.utc)
+            detail_data['status'] = 'new'
+            detail_data['user_notes'] = ''
+            companies_collection.insert_one(detail_data)
+            scraper.results.append(detail_data)
+            saved_companies += 1
+            jobs_collection.update_one(
+                {'_id': ObjectId(job_id)},
+                {'$set': {'companies_scraped': saved_companies}}
+            )
+
         companies_scraped = companies_collection.count_documents({'job_id': ObjectId(job_id)})
-
-        # Check if job was stopped by user
-        if job_id in stop_flags and stop_flags[job_id]:
-            status = 'stopped'
-            del stop_flags[job_id]
-        else:
-            status = 'completed'
-
+        status = 'stopped' if should_stop() else 'completed'
         jobs_collection.update_one(
             {'_id': ObjectId(job_id)},
             {
@@ -316,31 +334,36 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page
                     'total_companies': companies_scraped,
                     'companies_scraped': companies_scraped,
                     'progress': 100,
-                    'current_stage': status,
-                    'current_message': f'Scrape {status}',
+                    'current_stage': status.title(),
+                    'current_message': (
+                        'Scraping stopped by user' if status == 'stopped'
+                        else (
+                            'No companies found for the requested search range'
+                            if companies_scraped == 0
+                            else 'Scraping completed successfully'
+                        )
+                    ),
                     'debug_artifact_dir': str(scraper.debug_dir) if scraper and scraper.debug_dir else None
                 }
             }
         )
 
-    except LocalChBlockedError as e:
+    except ApifyRunStopped as e:
         companies_scraped = companies_collection.count_documents({'job_id': ObjectId(job_id)})
         jobs_collection.update_one(
             {'_id': ObjectId(job_id)},
             {
                 '$set': {
-                    'status': 'failed',
-                    'error_message': str(e),
+                    'status': 'stopped',
                     'completed_at': datetime.now(timezone.utc),
                     'companies_scraped': companies_scraped,
-                    'current_stage': 'search_page_blocked',
-                    'current_message': str(e),
-                    'debug_artifact_dir': str(scraper.debug_dir) if scraper and scraper.debug_dir else None
+                    'total_companies': companies_scraped,
+                    'current_stage': 'Stopped',
+                    'current_message': 'Scraping stopped by user',
                 }
             }
         )
     except Exception as e:
-        # Update job with error
         companies_scraped = companies_collection.count_documents({'job_id': ObjectId(job_id)})
         jobs_collection.update_one(
             {'_id': ObjectId(job_id)},
@@ -350,17 +373,15 @@ def run_scraper_background(job_id, keyword, max_pages, max_companies, start_page
                     'error_message': str(e),
                     'completed_at': datetime.now(timezone.utc),
                     'companies_scraped': companies_scraped,
-                    'current_stage': 'failed',
-                    'current_message': str(e),
+                    'current_stage': 'Failed',
+                    'current_message': f'Scraping failed: {e}',
                     'debug_artifact_dir': str(scraper.debug_dir) if scraper and scraper.debug_dir else None
                 }
             }
         )
     finally:
-        # Close the driver
         if scraper and scraper.driver:
             scraper.driver.quit()
-        # Clean up flags and threads
         if job_id in stop_flags:
             del stop_flags[job_id]
         if job_id in active_threads:
@@ -432,6 +453,7 @@ def build_export_dataframe(job_id=None, keyword=None, score_min=None, score_max=
         row.pop('_id', None)
         row.pop('job_id', None)
         row.pop('created_at', None)
+        row.pop('apify_data', None)
         export_rows.append(row)
 
     return pd.DataFrame(export_rows)
@@ -557,7 +579,8 @@ def check_keyword():
             pages_scraped = math.ceil(total_companies / 20) if total_companies > 0 else 0
             last_page = (start_page - 1) + pages_scraped if pages_scraped > 0 else 0
 
-        highest_page = max(highest_page, last_page)
+        if last_page > highest_page:
+            highest_page = last_page
 
     return jsonify({
         'exists': True,
@@ -715,7 +738,7 @@ def get_companies():
         # Get paginated results
         skip = (page - 1) * per_page
         companies = list(
-            companies_collection.find(query)
+            companies_collection.find(query, {'apify_data': 0})
             .sort('credibility_score', -1)
             .skip(skip)
             .limit(per_page)
@@ -756,7 +779,10 @@ def get_companies():
 @api_login_required
 def get_company(company_id):
     """Get specific company details"""
-    company = companies_collection.find_one({'_id': ObjectId(company_id)})
+    company = companies_collection.find_one(
+        {'_id': ObjectId(company_id)},
+        {'apify_data': 0},
+    )
     if not company:
         return jsonify({'error': 'Company not found'}), 404
     return jsonify(sanitize_for_json(company))

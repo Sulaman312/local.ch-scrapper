@@ -86,13 +86,13 @@ function renderActiveJobs(jobs) {
 
         const debugDetails = [];
         if (job.current_stage) {
-            debugDetails.push(`<strong>Stage:</strong> ${job.current_stage}`);
+            debugDetails.push(`<strong>Step:</strong> ${job.current_stage}`);
         }
         if (job.current_page) {
-            debugDetails.push(`<strong>Page:</strong> ${job.current_page}`);
+            debugDetails.push(`<strong>Requested pages:</strong> ${job.current_page}`);
         }
         if (job.current_message) {
-            debugDetails.push(`<strong>Status:</strong> ${job.current_message}`);
+            debugDetails.push(`<strong>Update:</strong> ${job.current_message}`);
         }
         if (job.current_url) {
             debugDetails.push(`<strong>URL:</strong> ${truncate(job.current_url, 100)}`);

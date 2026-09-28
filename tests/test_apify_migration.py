@@ -61,6 +61,13 @@ class FakeSession:
 
     def get(self, url, **kwargs):
         self.gets.append((url, kwargs))
+        if url.endswith("/users/me/limits"):
+            return FakeResponse({
+                "data": {
+                    "limits": {"maxMonthlyUsageUsd": 5},
+                    "current": {"monthlyUsageUsd": 0},
+                }
+            })
         if "/actor-runs/" in url:
             return FakeResponse({
                 "data": {
@@ -216,6 +223,71 @@ class ApifySourceTests(unittest.TestCase):
         source.search_by_keyword(max_companies=1000)
         run_input = source.session.posts[0][1]["json"]
         self.assertEqual(run_input["maxListings"], 1000)
+
+    def test_quota_check_skips_exhausted_token_and_uses_next_token(self):
+        class QuotaSession(FakeSession):
+            def get(self, url, **kwargs):
+                if url.endswith("/users/me/limits"):
+                    token = kwargs["headers"]["Authorization"]
+                    used = 5 if token.endswith("exhausted") else 1
+                    return FakeResponse({
+                        "data": {
+                            "limits": {"maxMonthlyUsageUsd": 5},
+                            "current": {"monthlyUsageUsd": used},
+                        }
+                    })
+                return super().get(url, **kwargs)
+
+        environment = {
+            "APIFY_API_TOKENS": "exhausted, available",
+            "APIFY_API_TOKEN": "",
+            "APIFY_MINIMUM_REMAINING_USD": "0.10",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            source = ApifyLocalChScraper(
+                keyword="plumber",
+                helper=Helper(),
+                session=QuotaSession([actor_item()]),
+            )
+        source.search_by_keyword(max_companies=1)
+        self.assertEqual(
+            source.session.posts[0][1]["headers"]["Authorization"],
+            "Bearer available",
+        )
+
+    def test_quota_error_when_starting_fails_over_to_next_token(self):
+        class StartQuotaSession(FakeSession):
+            def get(self, url, **kwargs):
+                if url.endswith("/users/me/limits"):
+                    return FakeResponse({
+                        "data": {
+                            "limits": {"maxMonthlyUsageUsd": 5},
+                            "current": {"monthlyUsageUsd": 1},
+                        }
+                    })
+                return super().get(url, **kwargs)
+
+            def post(self, url, **kwargs):
+                self.posts.append((url, kwargs))
+                if kwargs["headers"]["Authorization"].endswith("first"):
+                    return FakeResponse({
+                        "error": {"type": "not-enough-usage-to-run-paid-actor"}
+                    }, 403)
+                return FakeResponse({"data": {"id": "run-1"}}, 201)
+
+        environment = {
+            "APIFY_API_TOKENS": "first, second",
+            "APIFY_API_TOKEN": "",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            source = ApifyLocalChScraper(
+                keyword="plumber",
+                helper=Helper(),
+                session=StartQuotaSession([actor_item()]),
+            )
+        source.search_by_keyword(max_companies=1)
+        self.assertEqual(len(source.session.posts), 2)
+        self.assertTrue(source.session.posts[-1][1]["headers"]["Authorization"].endswith("second"))
 
     def test_continuation_starts_from_page_url_without_refetch(self):
         source = self.make_source([actor_item(i) for i in range(20)])

@@ -21,6 +21,13 @@ APIFY_BASE_URL = "https://api.apify.com/v2"
 DEFAULT_ACTOR_ID = "abotapi/local-ch-scraper"
 DEFAULT_LOCATION = "switzerland"
 DEFAULT_PAGE_SIZE = 20
+DEFAULT_MINIMUM_REMAINING_USD = 0.10
+
+_QUOTA_ERROR_TYPES = {
+    "limit-reached",
+    "not-enough-usage-to-run-paid-actor",
+    "monthly-usage-limit-too-low",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +42,10 @@ class ApifyRunError(RuntimeError):
 
 class ApifyRunStopped(RuntimeError):
     """Raised after an in-flight Actor run is stopped by the user."""
+
+
+class ApifyQuotaExceeded(ApifyRunError):
+    """Raised when an Apify account has no remaining usable quota."""
 
 
 _DAY_FIELDS = {
@@ -104,7 +115,8 @@ class ApifyLocalChScraper:
         self.current_run_id: Optional[str] = None
         self.current_dataset_id: Optional[str] = None
 
-        self.api_token = os.getenv("APIFY_API_TOKEN", "").strip()
+        self.api_tokens = self._configured_api_tokens()
+        self.api_token = ""
         self.actor_id = os.getenv("APIFY_ACTOR_ID", DEFAULT_ACTOR_ID).strip() or DEFAULT_ACTOR_ID
         self.location = (
             os.getenv("APIFY_DEFAULT_LOCATION", DEFAULT_LOCATION).strip()
@@ -117,8 +129,13 @@ class ApifyLocalChScraper:
         if self.language not in {"de", "en", "fr", "it"}:
             raise ApifyConfigError("APIFY_LANGUAGE must be one of: de, en, fr, it")
 
-        if not self.api_token:
-            raise ApifyConfigError("APIFY_API_TOKEN is not configured")
+        if not self.api_tokens:
+            raise ApifyConfigError(
+                "APIFY_API_TOKENS or APIFY_API_TOKEN is not configured"
+            )
+        self.minimum_remaining_usd = self._nonnegative_float(
+            "APIFY_MINIMUM_REMAINING_USD", DEFAULT_MINIMUM_REMAINING_USD
+        )
 
         use_proxy = os.getenv("APIFY_USE_PROXY", "true").strip().lower() == "true"
         proxy_groups = [
@@ -142,9 +159,85 @@ class ApifyLocalChScraper:
             raise ApifyConfigError(f"{name} must be greater than zero")
         return value
 
+    @staticmethod
+    def _nonnegative_float(name: str, default: float) -> float:
+        raw = os.getenv(name, str(default)).strip()
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ApifyConfigError(f"{name} must be a number") from exc
+        if value < 0:
+            raise ApifyConfigError(f"{name} must not be negative")
+        return value
+
+    @staticmethod
+    def _configured_api_tokens() -> List[str]:
+        """Read a comma/newline separated pool without ever logging secrets."""
+        raw_pool = os.getenv("APIFY_API_TOKENS", "")
+        candidates = re.split(r"[\s,]+", raw_pool)
+        legacy_token = os.getenv("APIFY_API_TOKEN", "")
+        if legacy_token:
+            candidates.append(legacy_token)
+
+        tokens = []
+        for candidate in candidates:
+            token = candidate.strip()
+            if token and token not in tokens:
+                tokens.append(token)
+        return tokens
+
     @property
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self.api_token}"}
+
+    @staticmethod
+    def _error_type(response) -> str:
+        try:
+            error = response.json().get("error") or {}
+            return str(error.get("type") or "").strip().lower()
+        except (AttributeError, TypeError, ValueError):
+            return ""
+
+    def _tokens_with_quota(self) -> List[str]:
+        """Return only tokens whose account reports enough spend capacity."""
+        eligible = []
+        self._report("apify_capacity_check", "Checking available Apify capacity")
+        for token in self.api_tokens:
+            try:
+                response = self.session.get(
+                    f"{APIFY_BASE_URL}/users/me/limits",
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=30,
+                )
+            except requests.RequestException as exc:
+                logger.warning("Could not verify an Apify token's limits: %s", exc)
+                continue
+
+            if response.status_code != 200:
+                logger.warning(
+                    "Skipping an Apify token because its limits check returned HTTP %s",
+                    response.status_code,
+                )
+                continue
+            try:
+                data = response.json()["data"]
+                limit = data["limits"].get("maxMonthlyUsageUsd")
+                used = data["current"].get("monthlyUsageUsd", 0)
+                remaining = None if limit is None else float(limit) - float(used or 0)
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.warning("Skipping an Apify token with an invalid limits response: %s", exc)
+                continue
+
+            if remaining is not None and remaining < self.minimum_remaining_usd:
+                logger.info("Skipping an Apify token with insufficient remaining quota")
+                continue
+            eligible.append(token)
+
+        if not eligible:
+            raise ApifyQuotaExceeded(
+                "No configured Apify account has enough remaining quota"
+            )
+        return eligible
 
     def _report(self, stage: str, message: str, **extra) -> None:
         if self.progress_callback:
@@ -169,6 +262,8 @@ class ApifyLocalChScraper:
             timeout=30,
         )
         if response.status_code not in (200, 201):
+            if self._error_type(response) in _QUOTA_ERROR_TYPES:
+                raise ApifyQuotaExceeded("The selected Apify account has reached its quota")
             raise ApifyRunError(
                 f"Failed to start Apify Actor: HTTP {response.status_code} "
                 f"{response.text[:300]}"
@@ -186,6 +281,22 @@ class ApifyLocalChScraper:
             run_id=run_id,
         )
         return run_id
+
+    def _start_actor_with_available_token(self, run_input: Dict) -> str:
+        """Start with a verified token and fail over only after a quota error."""
+        last_quota_error = None
+        for token in self._tokens_with_quota():
+            self.api_token = token
+            try:
+                self._report("apify_account_selected", "Starting with an available Apify account")
+                return self._run_actor(run_input)
+            except ApifyQuotaExceeded as exc:
+                last_quota_error = exc
+                logger.info("Apify account reached quota while starting a run; trying next token")
+
+        raise ApifyQuotaExceeded(
+            "All configured Apify accounts reached their quota while starting the run"
+        ) from last_quota_error
 
     def _abort_run(self, run_id: str) -> None:
         try:
@@ -528,7 +639,7 @@ class ApifyLocalChScraper:
             "Collecting full local.ch profiles",
             page_number=start_page,
         )
-        run_id = self._run_actor(run_input)
+        run_id = self._start_actor_with_available_token(run_input)
         run_data = self._wait_for_run(run_id)
         dataset_id = run_data.get("defaultDatasetId")
         if not dataset_id:

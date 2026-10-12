@@ -662,8 +662,17 @@ def start_scrape():
 @app.route('/api/scrape/jobs', methods=['GET'])
 @api_login_required
 def get_jobs():
-    """Get all scraping jobs"""
-    jobs = list(jobs_collection.find().sort('created_at', -1).limit(20))
+    """Get all scraping jobs with pagination"""
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 20, type=int)
+
+    # Get total count
+    total = jobs_collection.count_documents({})
+
+    # Get paginated results
+    skip = (page - 1) * per_page
+    jobs = list(jobs_collection.find().sort('created_at', -1).skip(skip).limit(per_page))
+
     # Convert datetime objects to ISO format strings with UTC timezone
     for job in jobs:
         if 'created_at' in job and job['created_at']:
@@ -672,7 +681,14 @@ def get_jobs():
             job['started_at'] = job['started_at'].isoformat() if hasattr(job['started_at'], 'isoformat') else job['started_at']
         if 'completed_at' in job and job['completed_at']:
             job['completed_at'] = job['completed_at'].isoformat() if hasattr(job['completed_at'], 'isoformat') else job['completed_at']
-    return jsonify(jobs)
+
+    return jsonify({
+        'jobs': jobs,
+        'total': total,
+        'page': page,
+        'per_page': per_page,
+        'total_pages': (total + per_page - 1) // per_page
+    })
 
 
 @app.route('/api/scrape/jobs/<job_id>', methods=['GET'])

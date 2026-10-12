@@ -70,6 +70,17 @@
                             </tbody>
                         </table>
                     </div>
+
+                    <!-- Jobs Pagination -->
+                    <div class="pagination" id="jobsPagination" style="display: none;">
+                        <button class="pagination-btn" id="jobsPrevBtn" onclick="changeJobsPage(-1)" disabled>
+                            <i class="fas fa-chevron-left"></i> Previous
+                        </button>
+                        <span class="pagination-info">Page <strong id="jobsCurrentPage">1</strong> of <strong id="jobsTotalPages">1</strong></span>
+                        <button class="pagination-btn" id="jobsNextBtn" onclick="changeJobsPage(1)" disabled>
+                            Next <i class="fas fa-chevron-right"></i>
+                        </button>
+                    </div>
                 </div>
             </div>
 

@@ -13,6 +13,11 @@ let currentJobStatus = null;
 let currentPipedriveImportJobId = null;
 let pipedrivePollTimeout = null;
 
+// Jobs pagination state
+let jobsCurrentPage = 1;
+let jobsTotalPages = 1;
+let jobsTotal = 0;
+
 // Load page
 document.addEventListener('DOMContentLoaded', async () => {
     // Initialize i18n first
@@ -69,16 +74,21 @@ async function logout(event) {
 }
 
 // Load all jobs
-async function loadJobs() {
+async function loadJobs(page = 1) {
     try {
-        const response = await fetch(`${API_BASE}/api/scrape/jobs`);
-        const jobs = await response.json();
+        const response = await fetch(`${API_BASE}/api/scrape/jobs?page=${page}&per_page=20`);
+        const data = await response.json();
 
-        document.getElementById('jobsCount').textContent = jobs.length;
+        // Update pagination state
+        jobsCurrentPage = data.page;
+        jobsTotalPages = data.total_pages;
+        jobsTotal = data.total;
+
+        document.getElementById('jobsCount').textContent = data.total;
 
         const tbody = document.getElementById('jobsBody');
 
-        if (jobs.length === 0) {
+        if (data.jobs.length === 0) {
             tbody.innerHTML = `
                 <tr>
                     <td colspan="5" style="text-align: center; padding: 3rem;">
@@ -89,10 +99,11 @@ async function loadJobs() {
                     </td>
                 </tr>
             `;
+            updateJobsPagination();
             return;
         }
 
-        tbody.innerHTML = jobs.map(job => `
+        tbody.innerHTML = data.jobs.map(job => `
             <tr>
                 <td><strong>${job.keyword}</strong></td>
                 <td>${formatDate(job.completed_at || job.created_at)}</td>
@@ -114,9 +125,34 @@ async function loadJobs() {
                 </td>
             </tr>
         `).join('');
+
+        updateJobsPagination();
     } catch (error) {
         console.error('Error loading jobs:', error);
     }
+}
+
+// Change jobs page
+function changeJobsPage(direction) {
+    jobsCurrentPage += direction;
+    loadJobs(jobsCurrentPage);
+}
+
+// Update jobs pagination controls
+function updateJobsPagination() {
+    const paginationDiv = document.getElementById('jobsPagination');
+    if (!paginationDiv) return;
+
+    if (jobsTotalPages <= 1) {
+        paginationDiv.style.display = 'none';
+        return;
+    }
+
+    paginationDiv.style.display = 'flex';
+    document.getElementById('jobsCurrentPage').textContent = jobsCurrentPage;
+    document.getElementById('jobsTotalPages').textContent = jobsTotalPages;
+    document.getElementById('jobsPrevBtn').disabled = jobsCurrentPage <= 1;
+    document.getElementById('jobsNextBtn').disabled = jobsCurrentPage >= jobsTotalPages;
 }
 
 // View specific job results

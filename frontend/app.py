@@ -662,33 +662,55 @@ def start_scrape():
 @app.route('/api/scrape/jobs', methods=['GET'])
 @api_login_required
 def get_jobs():
-    """Get all scraping jobs with pagination"""
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 20, type=int)
+    """Get all scraping jobs with optional pagination"""
+    # Check if pagination is requested
+    page_param = request.args.get('page')
+    per_page_param = request.args.get('per_page')
 
-    # Get total count
-    total = jobs_collection.count_documents({})
+    # If pagination params are provided, use pagination
+    use_pagination = page_param is not None or per_page_param is not None
 
-    # Get paginated results
-    skip = (page - 1) * per_page
-    jobs = list(jobs_collection.find().sort('created_at', -1).skip(skip).limit(per_page))
+    if use_pagination:
+        page = int(page_param) if page_param else 1
+        per_page = int(per_page_param) if per_page_param else 20
 
-    # Convert datetime objects to ISO format strings with UTC timezone
-    for job in jobs:
-        if 'created_at' in job and job['created_at']:
-            job['created_at'] = job['created_at'].isoformat() if hasattr(job['created_at'], 'isoformat') else job['created_at']
-        if 'started_at' in job and job['started_at']:
-            job['started_at'] = job['started_at'].isoformat() if hasattr(job['started_at'], 'isoformat') else job['started_at']
-        if 'completed_at' in job and job['completed_at']:
-            job['completed_at'] = job['completed_at'].isoformat() if hasattr(job['completed_at'], 'isoformat') else job['completed_at']
+        # Get total count
+        total = jobs_collection.count_documents({})
 
-    return jsonify({
-        'jobs': jobs,
-        'total': total,
-        'page': page,
-        'per_page': per_page,
-        'total_pages': (total + per_page - 1) // per_page
-    })
+        # Get paginated results
+        skip = (page - 1) * per_page
+        jobs = list(jobs_collection.find().sort('created_at', -1).skip(skip).limit(per_page))
+
+        # Convert datetime objects to ISO format strings with UTC timezone
+        for job in jobs:
+            if 'created_at' in job and job['created_at']:
+                job['created_at'] = job['created_at'].isoformat() if hasattr(job['created_at'], 'isoformat') else job['created_at']
+            if 'started_at' in job and job['started_at']:
+                job['started_at'] = job['started_at'].isoformat() if hasattr(job['started_at'], 'isoformat') else job['started_at']
+            if 'completed_at' in job and job['completed_at']:
+                job['completed_at'] = job['completed_at'].isoformat() if hasattr(job['completed_at'], 'isoformat') else job['completed_at']
+
+        return jsonify({
+            'jobs': jobs,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'total_pages': (total + per_page - 1) // per_page
+        })
+    else:
+        # Backward compatibility: return all jobs as array (limited to 20 for dashboard)
+        jobs = list(jobs_collection.find().sort('created_at', -1).limit(20))
+
+        # Convert datetime objects to ISO format strings with UTC timezone
+        for job in jobs:
+            if 'created_at' in job and job['created_at']:
+                job['created_at'] = job['created_at'].isoformat() if hasattr(job['created_at'], 'isoformat') else job['created_at']
+            if 'started_at' in job and job['started_at']:
+                job['started_at'] = job['started_at'].isoformat() if hasattr(job['started_at'], 'isoformat') else job['started_at']
+            if 'completed_at' in job and job['completed_at']:
+                job['completed_at'] = job['completed_at'].isoformat() if hasattr(job['completed_at'], 'isoformat') else job['completed_at']
+
+        return jsonify(jobs)
 
 
 @app.route('/api/scrape/jobs/<job_id>', methods=['GET'])
